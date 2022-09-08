@@ -301,11 +301,11 @@ class MyIdMenu: Reactor.Component {
     function showAbout() {
         var name = handler.get_app_name();
         msgbox("custom-nocancel-nook-hasclose", "About " + name, "<div style='line-height: 2em'> \
-            <div>Version: " + handler.get_version() + " \
+            <div>Version: " + handler.get_version() + " (Modified, source available at GitHub: XieJiSS/rustdesk) \
             <div .link .custom-event url='https://rustdesk.com/privacy'>Privacy Statement</div> \
             <div .link .custom-event url='https://rustdesk.com'>Website</div> \
             <div style='background: #2c8cff; color: white; padding: 1em; margin-top: 1em;'>Copyright &copy; 2022 Purslane Ltd.\
-            <br />" + handler.get_license() + " \
+            <br />Copyright &copy; 2022 ZJUPI<br />" + handler.get_license() + " \
             <p style='font-weight: bold'>Made with heart in this chaotic world!</p>\
             </div>\
         </div>", function(el) {
@@ -546,12 +546,12 @@ class InstallMe: Reactor.Component {
         return <div .install-me>
             <span />
             <div>{translate('install_tip')}</div>
-            <div><button #install-me .button>{translate('Install')}</button></div>
+            <!-- <div><button #install-me .button>{translate('Install')}</button></div> -->
         </div>;
     }
 
     event click $(#install-me) {
-        handler.goto_install();
+        // handler.goto_install();
     }
 }
 

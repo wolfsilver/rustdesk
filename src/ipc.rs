@@ -510,6 +510,11 @@ pub fn get_id() -> String {
     }
 }
 
+pub fn set_id(v: String) -> ResultType<()> {
+    Config::set_id(&v);
+    set_config("id", v)
+}
+
 pub fn get_password() -> String {
     if let Ok(Some(v)) = get_config("password") {
         Config::set_password(&v);

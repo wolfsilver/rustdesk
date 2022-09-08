@@ -1,6 +1,6 @@
 // Specify the Windows subsystem to eliminate console window.
 // Requires Rust 1.18.
-//#![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 
 use hbb_common::log;
 use librustdesk::*;
@@ -144,6 +144,13 @@ fn main() {
                     filepath = path.to_str().unwrap().to_string();
                 }
                 import_config(&filepath);
+            }
+            return;
+        } else if args[0] == "--id" {
+            if args.len() == 2 {
+                ipc::set_id(args[1].to_owned()).unwrap();
+            } else if args.len() == 1 {
+                println!("{}", ipc::get_id());
             }
             return;
         } else if args[0] == "--password" {
