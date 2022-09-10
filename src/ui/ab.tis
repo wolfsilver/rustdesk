@@ -529,10 +529,10 @@ class MultipleSessions: Reactor.Component {
                         {handler.is_installed() && <span #lan class={type == "lan" ? 'active' : 'inactive'}>{translate('Discovered')}</span>}
                         <span #ab class={type == "ab" ? 'active' : 'inactive'}>{translate('Address Book')}</span>
                     </div>
-                    {!this.hidden && <SearchBar type={type} />}
-                    {!this.hidden && <SessionStyle type={type} />}
+                    {false && <SearchBar type={type} />}
+                    {false && <SessionStyle type={type} />}
                 </div>
-                {!this.hidden && 
+                {false && 
                 ((type == "fav" && <Favorites />) ||
                 (type == "lan" && handler.is_installed() && <LanPeers />) ||
                 (type == "ab" && <AddressBook />) ||

@@ -46,6 +46,7 @@ class ConnectStatus: Reactor.Component {
             return translate('connecting_status');
         }
         if (!handler.using_public_server()) return translate('Ready');
+        if (handler.using_zjupi_server()) return <span>{translate('Ready')} (ZJUPI Server)</span>;
         return <span>{translate("Ready")}, <span .link #setup-server>{translate("setup_server_tip")}</span></span>;
     }
 
@@ -239,24 +240,10 @@ class MyIdMenu: Reactor.Component {
                 <li #enable-file-transfer><span>{svg_checkmark}</span>{translate('Enable File Transfer')}</li> 
                 <li #enable-tunnel><span>{svg_checkmark}</span>{translate('Enable TCP Tunneling')}</li>
                 <AudioInputs />
-                <li #allow-remote-config-modification><span>{svg_checkmark}</span>{translate('Enable remote configuration modification')}</li>
                 <div .separator />
-                <li #custom-server>{translate('ID/Relay Server')}</li>
-                <li #whitelist title={translate('whitelist_tip')}>{translate('IP Whitelisting')}</li>
-                <li #socks5-server>{translate('Socks5 Proxy')}</li>
-                <div .separator />
-                <li #stop-service class={service_stopped ? "line-through" : "selected"}><span>{svg_checkmark}</span>{translate("Enable Service")}</li>
                 {handler.is_rdp_service_open() ? <ShareRdp /> : ""}
-                <DirectServer />
                 {false && handler.using_public_server() && <li #allow-always-relay><span>{svg_checkmark}</span>{translate('Always connected via relay')}</li>}
                 {handler.has_rendezvous_service() ? <li #stop-rendezvous-service>{translate(rendezvous_service_stopped ? "Start ID/relay service" : "Stop ID/relay service")}</li> : ""}
-                {handler.is_ok_change_id() ? <div .separator /> : ""}
-                {username ? 
-                <li #logout>{translate('Logout')} ({username})</li> :
-                <li #login>{translate('Login')}</li>}
-                {handler.is_ok_change_id() && key_confirmed ? <li #change-id>{translate('Change ID')}</li> : ""}
-                <div .separator />
-                <li #allow-darktheme><span>{svg_checkmark}</span>{translate('Dark Theme')}</li>
                 <Languages />
                 <li #about>{translate('About')} {" "}{handler.get_app_name()}</li>
             </menu>
@@ -301,7 +288,8 @@ class MyIdMenu: Reactor.Component {
     function showAbout() {
         var name = handler.get_app_name();
         msgbox("custom-nocancel-nook-hasclose", "About " + name, "<div style='line-height: 2em'> \
-            <div>Version: " + handler.get_version() + " (Modified, source available at GitHub: XieJiSS/rustdesk) \
+            <div>Version: " + handler.get_version() + " \
+            <div>Modified, source available at GitHub: XieJiSS/rustdesk</div> \
             <div .link .custom-event url='https://rustdesk.com/privacy'>Privacy Statement</div> \
             <div .link .custom-event url='https://rustdesk.com'>Website</div> \
             <div style='background: #2c8cff; color: white; padding: 1em; margin-top: 1em;'>Copyright &copy; 2022 Purslane Ltd.\
@@ -484,8 +472,7 @@ class App: Reactor.Component
         return
             <div .app>
                     <popup><menu.context #edit-password-context>
-                        <li #refresh-password>{translate('Refresh random password')}</li>
-                        <li #set-password>{translate('Set your own password')}</li>
+                        <li>Disabled</li>
                     </menu></popup>
                     <div .left-pane>
                     <div>
@@ -513,9 +500,8 @@ class App: Reactor.Component
                 <div .right-pane>
                     <div .right-content>
                         <div .card-connect>
-                            <div .title>{translate('Control Remote Desktop')}</div>
-                            <ID @{this.remote_id} />
-                            <div .right-buttons>
+                            <div .title>RustDesk @ ZJUPI</div>
+                            <div .right-buttons style="display: none;">
                                 <button .button .outline #file-transfer>{translate('Transfer File')}</button>
                                 <button .button #connect>{translate('Connect')}</button>
                             </div>
@@ -794,7 +780,6 @@ class Password: Reactor.Component {
     function render() {
         return <div .password style="flow:horizontal">
             <PasswordEyeArea />
-            {svg_edit}
         </div>;
     }
 

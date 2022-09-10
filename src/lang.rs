@@ -21,20 +21,8 @@ lazy_static::lazy_static! {
     pub static ref LANGS: Value =
         json!(vec![
             ("en", "English"),
-            ("it", "Italiano"),
-            ("fr", "Français"),
-            ("de", "Deutsch"),
             ("cn", "简体中文"),
             ("tw", "繁體中文"),
-            ("pt", "Português"),
-            ("es", "Español"),
-            ("ru", "Русский"),
-            ("sk", "Slovenčina"),
-            ("id", "Indonesia"),
-            ("cs", "Čeština"),
-            ("da", "Dansk"),
-            ("eo", "Esperanto"),
-            ("tr", "Türkçe"),
         ]);
 }
 
