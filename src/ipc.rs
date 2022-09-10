@@ -515,6 +515,10 @@ pub fn set_id(v: String) -> ResultType<()> {
     set_config("id", v)
 }
 
+pub fn is_ok_change_id() -> bool {
+    machine_uid::get().is_ok()
+}
+
 pub fn get_password() -> String {
     if let Ok(Some(v)) = get_config("password") {
         Config::set_password(&v);

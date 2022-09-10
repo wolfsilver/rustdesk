@@ -147,6 +147,9 @@ fn main() {
             }
             return;
         } else if args[0] == "--id" {
+            if !ipc::is_ok_change_id() {
+                return;
+            }
             if args.len() == 2 {
                 ipc::set_id(args[1].to_owned()).unwrap();
             } else if args.len() == 1 {

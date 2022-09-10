@@ -328,6 +328,11 @@ impl UI {
         crate::get_custom_rendezvous_server(self.get_option_("custom-rendezvous-server")).is_empty()
     }
 
+    fn using_zjupi_server(&self) -> bool {
+        // public server is defaulted to zjupi
+        self.using_public_server()
+    }
+
     fn get_options(&self) -> Value {
         let mut m = Value::map();
         for (k, v) in self.2.lock().unwrap().iter() {
@@ -765,6 +770,7 @@ impl sciter::EventHandler for UI {
         fn get_api_server();
         fn is_xfce();
         fn using_public_server();
+        fn using_zjupi_server();
         fn get_id();
         fn get_password();
         fn update_password(String);
