@@ -7,9 +7,10 @@ import * as globals from "./globals";
 import { decompress, mapKey, sleep } from "./common";
 
 const PORT = 21116;
+// only the first is used to init `HOST`
 const HOSTS = [
-  "10.115.10.123",
   "192.168.31.242",
+  // "10.115.10.123",
 ];
 let HOST = localStorage.getItem("rendezvous-server") || HOSTS[0];
 const SCHEMA = "ws://";

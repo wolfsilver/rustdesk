@@ -12,7 +12,18 @@ import 'pages/settings_page.dart';
 Future<Null> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   var a = FFI.ffiModel.init();
-  var b = Firebase.initializeApp();
+  var b = Firebase.initializeApp(
+    options: FirebaseOptions(
+      apiKey: "AIzaSyCgehIZk1aFP0E7wZtYRRqrfvNiNAF39-A",
+      authDomain: "rustdesk.firebaseapp.com",
+      databaseURL: "https://rustdesk.firebaseio.com",
+      projectId: "rustdesk",
+      storageBucket: "rustdesk.appspot.com",
+      messagingSenderId: "768133699366",
+      appId: "1:768133699366:web:d50faf0792cb208d7993e7",
+      measurementId: "G-9PEH85N6ZQ",
+    ),
+  );
   await a;
   await b;
   refreshCurrentUser();
