@@ -298,9 +298,9 @@ class ImageModel with ChangeNotifier {
       }
       initializeCursorAndCanvas();
       Future.delayed(Duration(milliseconds: 1), () {
+        FFI.setByName(
+            'peer_option', '{"name": "view-style", "value": "shrink"}');
         if (FFI.ffiModel.isPeerAndroid) {
-          FFI.setByName(
-              'peer_option', '{"name": "view-style", "value": "shrink"}');
           FFI.canvasModel.updateViewStyle();
         }
       });
