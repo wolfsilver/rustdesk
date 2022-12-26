@@ -684,8 +684,8 @@ class _RemotePageState extends State<RemotePage> {
             child: Text(translate('Insert') + ' Ctrl + Alt + Del'),
             value: 'cad'));
       }
-      more.add(PopupMenuItem<String>(
-          child: Text(translate('Insert Lock')), value: 'lock'));
+      // more.add(PopupMenuItem<String>(
+      //     child: Text(translate('Insert Lock')), value: 'lock'));
       if (pi.platform == 'Windows' &&
           FFI.getByName('toggle_option', 'privacy-mode') != 'true') {
         more.add(PopupMenuItem<String>(
@@ -1024,8 +1024,8 @@ void showOptions() {
     if (perms['keyboard'] != false) {
       if (perms['clipboard'] != false)
         more.add(getToggle(setState, 'disable-clipboard', 'Disable clipboard'));
-      more.add(getToggle(
-          setState, 'lock-after-session-end', 'Lock after session end'));
+      // more.add(getToggle(
+      //     setState, 'lock-after-session-end', 'Lock after session end'));
       if (pi.platform == 'Windows') {
         more.add(getToggle(setState, 'privacy-mode', 'Privacy mode'));
       }
