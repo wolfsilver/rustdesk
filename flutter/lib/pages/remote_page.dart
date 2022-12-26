@@ -663,8 +663,8 @@ class _RemotePageState extends State<RemotePage> {
           TextButton(
             style: flatButtonStyle,
             onPressed: () {
-              Navigator.pop(context);
-              showSetOSPassword(false);
+              // Navigator.pop(context);
+              // showSetOSPassword(false);
             },
             child: Icon(Icons.edit, color: MyTheme.accent),
           )
@@ -721,9 +721,9 @@ class _RemotePageState extends State<RemotePage> {
       } else if (value == 'enter_os_password') {
         var password = FFI.getByName('peer_option', "os-password");
         if (password != "") {
-          FFI.setByName('input_os_password', password);
+          // FFI.setByName('input_os_password', password);
         } else {
-          showSetOSPassword(true);
+          // showSetOSPassword(true);
         }
       } else if (value == 'reset_canvas') {
         FFI.cursorModel.reset();
