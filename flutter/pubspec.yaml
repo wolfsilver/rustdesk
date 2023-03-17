@@ -61,6 +61,9 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
 
+dependency_overrides:
+  firebase_core_platform_interface: 4.5.1
+
 # rerun: flutter pub run flutter_launcher_icons:main
 flutter_icons:
   android: "ic_launcher"
