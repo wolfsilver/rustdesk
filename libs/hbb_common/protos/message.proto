@@ -472,6 +472,7 @@ message AudioFrame {
 message BackNotification {
   // no need to consider block input by someone else
   enum BlockInputState {
+    X_Placeholder = 0;
     X_StateUnknown = 1;
     X_OnSucceeded = 2;
     X_OnFailed = 3;
@@ -479,6 +480,7 @@ message BackNotification {
     X_OffFailed = 5;
   }
   enum PrivacyModeState {
+    Placeholder = 0;
     StateUnknown = 1;
     // Privacy mode on by someone else
     OnByOther = 2;
