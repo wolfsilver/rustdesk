@@ -432,7 +432,7 @@ impl Connection {
                         } else {
                             Self::send_block_input_error(
                                 &tx,
-                                back_notification::BlockInputState::OnFailed,
+                                back_notification::BlockInputState::X_OnFailed,
                             );
                         }
                     }
@@ -442,7 +442,7 @@ impl Connection {
                         } else {
                             Self::send_block_input_error(
                                 &tx,
-                                back_notification::BlockInputState::OffFailed,
+                                back_notification::BlockInputState::X_OffFailed,
                             );
                         }
                     }

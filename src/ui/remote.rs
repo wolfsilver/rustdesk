@@ -2276,7 +2276,7 @@ impl Remote {
         match notification.union {
             Some(back_notification::Union::block_input_state(state)) => {
                 self.handle_back_msg_block_input(
-                    state.enum_value_or(back_notification::BlockInputState::StateUnknown),
+                    state.enum_value_or(back_notification::BlockInputState::X_StateUnknown),
                 )
                 .await;
             }
@@ -2302,18 +2302,18 @@ impl Remote {
 
     async fn handle_back_msg_block_input(&mut self, state: back_notification::BlockInputState) {
         match state {
-            back_notification::BlockInputState::OnSucceeded => {
+            back_notification::BlockInputState::X_OnSucceeded => {
                 self.update_block_input_state(true);
             }
-            back_notification::BlockInputState::OnFailed => {
+            back_notification::BlockInputState::X_OnFailed => {
                 self.handler
                     .msgbox("custom-error", "Block user input", "Failed");
                 self.update_block_input_state(false);
             }
-            back_notification::BlockInputState::OffSucceeded => {
+            back_notification::BlockInputState::X_OffSucceeded => {
                 self.update_block_input_state(false);
             }
-            back_notification::BlockInputState::OffFailed => {
+            back_notification::BlockInputState::X_OffFailed => {
                 self.handler
                     .msgbox("custom-error", "Unblock user input", "Failed");
             }
