@@ -621,6 +621,11 @@ class _RemotePageState extends State<RemotePage> {
         FFI.getByName('toggle_option', 'show-remote-cursor') == 'true') {
       paints.add(CursorPaint());
     }
+
+    FFI.setByName(
+        'peer_option', '{"name": "view-style", "value": "shrink"}');
+    FFI.canvasModel.updateViewStyle();
+
     return Container(
         color: MyTheme.canvasColor, child: Stack(children: paints));
   }

@@ -300,9 +300,9 @@ class ImageModel with ChangeNotifier {
       Future.delayed(Duration(milliseconds: 1), () {
         FFI.setByName(
             'peer_option', '{"name": "view-style", "value": "shrink"}');
-        if (FFI.ffiModel.isPeerAndroid) {
-          FFI.canvasModel.updateViewStyle();
-        }
+        // if (FFI.ffiModel.isPeerAndroid) {
+        FFI.canvasModel.updateViewStyle();
+        // }
       });
     }
     _image = image;
