@@ -93,3 +93,26 @@ class WebHomePage extends StatelessWidget {
     );
   }
 }
+
+class PassArgumentsScreen extends StatelessWidget {
+  static const routeName = '/connect';
+  late var connectionPage;
+  late Map<String, String> queryParameters;
+  PassArgumentsScreen(Map<String, String> queryParameters){
+    this.queryParameters = queryParameters;
+    connectionPage = ConnectionPage(id: queryParameters['id'], pw: queryParameters['pw']);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: MyTheme.grayBg,
+      appBar: AppBar(
+        centerTitle: true,
+        title: Text("RustDesk"),
+        actions: connectionPage.appBarActions,
+      ),
+      body: connectionPage,
+    );
+  }
+}

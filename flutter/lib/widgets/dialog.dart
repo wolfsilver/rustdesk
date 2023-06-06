@@ -100,7 +100,13 @@ void updatePasswordDialog() {
   });
 }
 
-void enterPasswordDialog(String id) {
+void enterPasswordDialog(String id, String? password) {
+  if(password != null){
+    FFI.login(password, false);
+    // showLoading(translate('Logging in...'));
+    return;
+  }
+
   final controller = TextEditingController();
   var remember = FFI.getByName('remember', id) == 'true';
   DialogManager.show((setState, close) {
@@ -164,7 +170,7 @@ void wrongPasswordDialog(String id) {
             TextButton(
               style: flatButtonStyle,
               onPressed: () {
-                enterPasswordDialog(id);
+                enterPasswordDialog(id, null);
               },
               child: Text(translate('Retry')),
             ),

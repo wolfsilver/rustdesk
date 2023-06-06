@@ -11,7 +11,10 @@ import 'settings_page.dart';
 import 'scan_page.dart';
 
 class ConnectionPage extends StatefulWidget implements PageShape {
-  ConnectionPage({Key? key}) : super(key: key);
+  ConnectionPage({Key? key, this.id, this.pw}) : super(key: key);
+
+  String? id;
+  String? pw;
 
   @override
   final icon = Icon(Icons.connected_tv);
@@ -40,6 +43,10 @@ class _ConnectionPageState extends State<ConnectionPage> {
         if (_updateUrl.isNotEmpty) setState(() {});
       });
     }
+
+    if(widget.id != null && widget.pw != null){
+      connect(widget.id!, widget.pw!);
+    }
   }
 
   @override
@@ -62,10 +69,10 @@ class _ConnectionPageState extends State<ConnectionPage> {
 
   void onConnect() {
     var id = _idController.text.trim();
-    connect(id);
+    connect(id, null);
   }
 
-  void connect(String id, {bool isFileTransfer = false}) async {
+  void connect(String id, String? pw, {bool isFileTransfer = false}) async {
     if (id == '') return;
     id = id.replaceAll(' ', '');
     if (isFileTransfer) {
@@ -84,7 +91,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
       Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (BuildContext context) => RemotePage(id: id),
+          builder: (BuildContext context) => RemotePage(id: id, pw: pw),
         ),
       );
     }
@@ -211,8 +218,8 @@ class _ConnectionPageState extends State<ConnectionPage> {
           width: width,
           child: Card(
               child: GestureDetector(
-                  onTap: !isDesktop ? () => connect('${p.id}') : null,
-                  onDoubleTap: isDesktop ? () => connect('${p.id}') : null,
+                  onTap: !isDesktop ? () => connect('${p.id}', null) : null,
+                  onDoubleTap: isDesktop ? () => connect('${p.id}', null) : null,
                   onLongPressStart: (details) {
                     final x = details.globalPosition.dx;
                     final y = details.globalPosition.dy;
@@ -266,7 +273,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
         removePreference(id);
       }();
     } else if (value == 'file') {
-      connect(id, isFileTransfer: true);
+      connect(id, null, isFileTransfer: true);
     }
   }
 }
