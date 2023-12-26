@@ -471,7 +471,6 @@ jobs:
       - name: Before build
         run: |
           cd flutter/web/js
-          npm install protoc
           yarn
           yarn build
           cd ..
