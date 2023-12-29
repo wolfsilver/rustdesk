@@ -490,28 +490,12 @@ jobs:
           flutter upgrade || true
           flutter pub get
           flutter config --enable-web
-
-      - name: Install flutter rust bridge deps
-        shell: bash
-        run: |
-          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid"
-          pushd flutter && flutter pub get && popd
-
-      - name: Run flutter rust bridge
-        run: |
-          ~/.cargo/bin/flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart
-
-      - name: Setup vcpkg with Github Actions binary cache
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: /opt/artifacts/vcpkg
-          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          # TODO 兼容性问题
 
       - name: Build rustdesk
         run: |
           pwd
           cd flutter
-          # ./run.sh
           flutter build web --release
           tar -czvf rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.tar.gz build/web
 
