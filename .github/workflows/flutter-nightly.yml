@@ -24,21 +24,23 @@ jobs:
   #       run: test -z $(git rev-list  --after="24 hours"  ${{ github.sha }}) && echo "::set-output name=should_run::false"
 
   check_date:
-    name: Get release body
-    id: get_release_body
-    uses: actions/github-script@v7
-    with:
-      script: |
-        const response = await github.request('GET /repos/{owner}/{repo}/releases/tags/{tag}', {
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          tag: 'nightly',
-        });
-        // 终止流水线
-        // if (response.data.body == '${{ github.sha }}') {
-        //   core.setFailed('The current version has been built');
-        // }
-        return response.data.body == '${{ github.sha }}';
+    name: Check latest commit
+    steps:
+      - uses: actions/github-script@v7
+        id: get_release_body
+        name: Get last commit
+        with:
+          script: |
+            const response = await github.request('GET /repos/{owner}/{repo}/releases/tags/{tag}', {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: 'nightly',
+            });
+            // 终止流水线
+            // if (response.data.body == '${{ github.sha }}') {
+            //   core.setFailed('The current version has been built');
+            // }
+            return response.data.body == '${{ github.sha }}';
 
   run-flutter-nightly-build:
     needs: check_date
