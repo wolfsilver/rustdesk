@@ -427,6 +427,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           prerelease: true
+          body: ${{ github.sha }}
           tag_name: ${{ env.TAG_NAME }}
           files: |
             rustdesk*-${{ matrix.job.arch }}.dmg
