@@ -171,7 +171,7 @@ jobs:
     name: ${{ matrix.job.target }} (${{ matrix.job.os }})
     runs-on: ${{ matrix.job.os }}
     # Temporarily disable this action due to additional test is needed.
-    # if: false 
+    # if: false
     strategy:
       fail-fast: false
       matrix:
@@ -901,7 +901,7 @@ jobs:
             cat ~/.cargo/config
             # start build
             pushd /workspace
-            # mock 
+            # mock
             case "${{ matrix.job.arch }}" in
               x86_64)
                 # no need mock on x86_64
@@ -924,7 +924,7 @@ jobs:
     if: ${{ inputs.upload-artifact }}
     needs: [generate-bridge-linux]
     name: build-rust-lib ${{ matrix.job.target }} (${{ matrix.job.os }}) [${{ matrix.job.extra-build-features }}]
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-20.04
     strategy:
       fail-fast: false
       matrix:
@@ -1132,7 +1132,7 @@ jobs:
   build-rustdesk-sciter-arm:
     if: ${{ inputs.upload-artifact }}
     name: build-rustdesk(sciter) ${{ matrix.job.target }} (${{ matrix.job.os }}) [${{ matrix.job.extra-build-features }}]
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-20.04
     strategy:
       fail-fast: false
       matrix:
@@ -1971,7 +1971,7 @@ jobs:
             # disable git safe.directory
             git config --global --add safe.directory "*"
             pushd /workspace
-            # install 
+            # install
             apt-get update -y
             apt-get install -y \
                cmake \
