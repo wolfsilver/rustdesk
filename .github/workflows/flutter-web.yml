@@ -1,0 +1,140 @@
+name: Build the web version of the RustDesk
+
+on:
+  push:
+    branches:
+      - build-web
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      upload-artifact:
+        type: boolean
+        default: true
+      upload-tag:
+        type: string
+        default: "nightly-web"
+
+env:
+  CARGO_NDK_VERSION: "3.1.2"
+  LLVM_VERSION: "15.0.6"
+  FLUTTER_VERSION: "3.13.9"
+  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
+  # for arm64 linux because official Dart SDK does not work
+  FLUTTER_ELINUX_VERSION: "3.13.9"
+  FLUTTER_ELINUX_COMMIT_ID: "f4d4205893c16b0aa9cb6ba46b9f32b639d3b057"
+  TAG_NAME: "nightly-web"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  # vcpkg version: 2023.10.19
+  # for multiarch gcc compatibility
+  VCPKG_COMMIT_ID: "8eb57355a4ffb410a2e94c07b4dca2dffbee8e50"
+  VERSION: "1.2.4"
+  NDK_VERSION: "r26b"
+  #signing keys env variable checks
+  ANDROID_SIGNING_KEY: '${{ secrets.ANDROID_SIGNING_KEY }}'
+  MACOS_P12_BASE64: '${{ secrets.MACOS_P12_BASE64 }}'
+  # To make a custom build with your own servers set the below secret values
+  RS_PUB_KEY: '${{ secrets.RS_PUB_KEY }}'
+  RENDEZVOUS_SERVER: '${{ secrets.RENDEZVOUS_SERVER }}'
+  API_SERVER: '${{ secrets.API_SERVER }}'
+  UPLOAD_ARTIFACT: "${{ inputs.upload-artifact }}"
+
+jobs:
+  build-rustdesk-web:
+    name: build rustdesk web
+    runs-on: ubuntu-20.04
+    # strategy:
+    #   fail-fast: false
+    #   matrix:
+    #     job:
+    #       - {
+    #           arch: x86_64,
+    #           target: x86_64-unknown-linux-gnu,
+    #           os: ubuntu-20.04,
+    #           extra-build-features: "",
+    #         }
+    steps:
+      - name: Get release body
+        id: get_release_body
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const response = await github.request('GET /repos/{owner}/{repo}/releases/tags/{tag}', {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: '${{ env.TAG_NAME }}',
+            });
+            // 终止流水线
+            // if (response.data.body == '${{ github.sha }}') {
+            //   core.setFailed('The current version has been built');
+            // }
+            return response.data.body == '${{ github.sha }}';
+
+
+      - name: Checkout source code
+        if: ${{ steps.get_release_body.outputs.result != 'true' }}
+        uses: actions/checkout@v3
+
+      - name: Before build
+        run: |
+          cd flutter/web/js
+          yarn
+          yarn pre-build
+          yarn build
+          cd ..
+          wget https://github.com/rustdesk/doc.rustdesk.com/releases/download/console/web_deps.tar.gz
+          tar -xzvf web_deps.tar.gz
+
+      - name: Install flutter
+        uses: subosito/flutter-action@v2
+        id: flutter-action
+        with:
+          channel: "master"
+          # flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: flutter config
+        run: |
+          cd flutter
+          flutter upgrade || true
+          flutter pub get
+          flutter config --enable-web
+          # TODO 兼容性问题
+          CACHE_PATH=${{ steps.flutter-action.outputs.CACHE-PATH }}
+
+          # 替换文件/opt/hostedtoolcache/flutter/master-3.13.9-x64/.pub-cache/hosted/pub.dev/dash_chat-1.1.16/lib/src/widgets/message_container.dart 中的accentColor为colorScheme.secondary
+          sed -i 's/accentColor/colorScheme.secondary/g' ${CACHE_PATH}/.pub-cache/hosted/pub.dev/dash_chat-1.1.16/lib/src/widgets/message_container.dart
+          sed -i 's/accentColor/colorScheme.secondary/g' ${CACHE_PATH}/.pub-cache/hosted/pub.dev/dash_chat-1.1.16/lib/src/widgets/quick_reply.dart
+          # 替换${CACHE_PATH}/.pub-cache/hosted/pub.dev/dash_chat-1.1.16/lib/src/message_listview.dart中的text));为text!));
+          sed -i 's/text));/text!));/g' ${CACHE_PATH}/.pub-cache/hosted/pub.dev/dash_chat-1.1.16/lib/src/message_listview.dart
+
+
+      - name: Build rustdesk
+        run: |
+          # 从cargo.toml中获取版本号
+          VERSION=$(grep -E '^version' Cargo.toml | sed -E 's/.*"(.*)"/\1/')
+          cd flutter
+          flutter build web --release
+          
+          # Get the compiled file name with a specific hash
+          compiled_index_file=$(ls web/js/dist | grep -E 'index.[a-zA-Z0-9]+\.js')
+          compiled_vendor_file=$(ls web/js/dist | grep -E 'vendor.[a-zA-Z0-9]+\.js')
+
+          # Replace the file name in the script tag
+          sed -i "s/js\/dist\/index.js/js\/dist\/$compiled_index_file/" build/web/index.html
+          sed -i "s/js\/dist\/vendor.js/js\/dist\/$compiled_vendor_file/" build/web/index.html
+
+          # 删除flutter/build/web/js目录下除了dist外的所有文件
+          find build/web/js -mindepth 1 -maxdepth 1 ! -name dist -exec rm -rf {} \;
+          rm -rf build/web/web_deps.tar.gz
+          tar -czvf rustdesk-web-${VERSION}.tar.gz build/web
+
+      - name: Publish package
+        uses: softprops/action-gh-release@v1
+        with:
+          prerelease: true
+          body: ${{ github.sha }}
+          tag_name: ${{ env.TAG_NAME }}
+          generate_release_notes: |
+            echo "build web version"
+          files: |
+            flutter/*.tar.gz

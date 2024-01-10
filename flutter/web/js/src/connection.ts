@@ -8,11 +8,9 @@ import { decompress, mapKey, sleep } from "./common";
 
 const PORT = 21116;
 // only the first is used to init `HOST`
-const HOSTS = [
-  "10.115.10.123",
-];
+const HOSTS = [location.hostname];
 let HOST = localStorage.getItem("rendezvous-server") || HOSTS[0];
-const SCHEMA = "ws://";
+const SCHEMA = location.protocol === 'https:' ? 'wss://' : "ws://";
 
 type MsgboxCallback = (type: string, title: string, text: string) => void;
 type DrawCallback = (data: Uint8Array) => void;
@@ -753,9 +751,9 @@ function getrUriFromRs(
   if (uri.indexOf(":") > 0) {
     const tmp = uri.split(":");
     const port = parseInt(tmp[1]);
-    uri = tmp[0] + ":" + (port + (isRelay ? roffset || 3 : 2));
+    uri = tmp[0] + "/" + (port + (isRelay ? roffset || 3 : 2));
   } else {
-    uri += ":" + (PORT + (isRelay ? 3 : 2));
+    uri += "/" + (PORT + (isRelay ? 3 : 2));
   }
   return SCHEMA + uri;
 }

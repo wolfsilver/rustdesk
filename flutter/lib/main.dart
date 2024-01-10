@@ -12,30 +12,30 @@ import 'pages/settings_page.dart';
 Future<Null> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   var a = FFI.ffiModel.init();
-  var b = Firebase.initializeApp(
-    options: FirebaseOptions(
-      apiKey: "AIzaSyCgehIZk1aFP0E7wZtYRRqrfvNiNAF39-A",
-      authDomain: "rustdesk.firebaseapp.com",
-      databaseURL: "https://rustdesk.firebaseio.com",
-      projectId: "rustdesk",
-      storageBucket: "rustdesk.appspot.com",
-      messagingSenderId: "768133699366",
-      appId: "1:768133699366:web:d50faf0792cb208d7993e7",
-      measurementId: "G-9PEH85N6ZQ",
-    ),
-  );
+  // var b = Firebase.initializeApp(
+  //   options: FirebaseOptions(
+  //     apiKey: "AIzaSyCgehIZk1aFP0E7wZtYRRqrfvNiNAF39-A",
+  //     authDomain: "rustdesk.firebaseapp.com",
+  //     databaseURL: "https://rustdesk.firebaseio.com",
+  //     projectId: "rustdesk",
+  //     storageBucket: "rustdesk.appspot.com",
+  //     messagingSenderId: "768133699366",
+  //     appId: "1:768133699366:web:d50faf0792cb208d7993e7",
+  //     measurementId: "G-9PEH85N6ZQ",
+  //   ),
+  // );
   await a;
-  await b;
+  // await b;
   refreshCurrentUser();
   toAndroidChannelInit();
-  FFI.setByName('option',
-      '{"name": "custom-rendezvous-server", "value": "supportdesk.itportaal.nl"}');
-  FFI.setByName('option',
-      '{"name": "relay-server", "value": "supportdesk.itportaal.nl"}');
-  FFI.setByName('option',
-      '{"name": "key", "value": "OvYPJS8I5xV+d6sx3a7Ce9TVakfKdT3Zy3T7C1jjx+A="}');
-  FFI.setByName('option',
-      '{"name": "api-server", "value": "https://supportdesk.itportaal.nl"}');
+  // FFI.setByName('option',
+  //     '{"name": "custom-rendezvous-server", "value": "supportdesk.itportaal.nl"}');
+  // FFI.setByName('option',
+  //     '{"name": "relay-server", "value": "supportdesk.itportaal.nl"}');
+  // FFI.setByName('option',
+  //     '{"name": "key", "value": "OvYPJS8I5xV+d6sx3a7Ce9TVakfKdT3Zy3T7C1jjx+A="}');
+  // FFI.setByName('option',
+  //     '{"name": "api-server", "value": "https://supportdesk.itportaal.nl"}');
   runApp(App());
 }
 

@@ -31,7 +31,7 @@
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
 
   <title>RustDesk</title>
-  <link rel="manifest" href="manifest.json">
+  <link rel="manifest" crossorigin="use-credentials" href="manifest.json">
   <script src="ogvjs-1.8.6/ogv.js"></script>
   <script type="module" crossorigin src="js/dist/index.js"></script>
   <link rel="modulepreload" href="js/dist/vendor.js">
@@ -176,7 +176,7 @@
 
     // Initialize Firebase
     firebase.initializeApp(firebaseConfig);
-    firebase.analytics();
+    // firebase.analytics();
   </script>
 </body>
 
