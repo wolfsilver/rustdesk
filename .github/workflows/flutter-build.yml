@@ -1122,17 +1122,52 @@ jobs:
             cat ~/.cargo/config
             # start build
             pushd /workspace
-            # mock
-            case "${{ matrix.job.arch }}" in
+            export VCPKG_ROOT=/opt/artifacts/vcpkg
+            if [[ "${{ matrix.job.arch }}" == "aarch64" ]]; then
+              export JOBS="--jobs 3"
+            else
+              export JOBS=""
+            fi
+            echo $JOBS
+            cargo build --lib $JOBS --features hwcodec,flutter,flutter_texture_render --release
+            rm -rf target/release/deps target/release/build
+            rm -rf ~/.cargo
+
+            # Setup Flutter
+            # disable git safe.directory
+            git config --global --add safe.directory "*"
+            pushd /workspace
+            case ${{ matrix.job.arch }} in
+              aarch64)
+                export PATH=/opt/flutter-elinux/bin:$PATH
+                sed -i "s/flutter build linux --release/flutter-elinux build linux --verbose/g" ./build.py
+                export ARCH=arm64
+                sed -i "s/x64\/release/arm64\/release/g" ./build.py
+              ;;
               x86_64)
-                # no need mock on x86_64
-                export VCPKG_ROOT=/opt/artifacts/vcpkg
-                export DEFAULT_FEAT=""
-                if ${{ matrix.job.enable-headless }}; then
-                  export DEFAULT_FEAT=linux_headless
-                fi
-                cargo build --lib --features hwcodec,flutter,flutter_texture_render,${{ matrix.job.extra-build-features }},$DEFAULT_FEAT --release
-                ;;
+                export PATH=/opt/flutter/bin:$PATH
+              ;;
+            esac
+            popd
+            pushd /opt
+            wget https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${{ env.FLUTTER_VERSION }}-stable.tar.xz
+            tar xf flutter_linux_${{ env.FLUTTER_VERSION }}-stable.tar.xz
+            case ${{ matrix.job.arch }} in
+              aarch64)
+                # clone repo and reset to flutter ${{ env.FLUTTER_VERSION }}
+                git clone https://github.com/sony/flutter-elinux.git || true
+                pushd flutter-elinux
+                  git fetch
+                  git reset --hard ${{ env.FLUTTER_VERSION }}
+                  bin/flutter-elinux doctor -v
+                  bin/flutter-elinux precache --linux
+                popd
+                cp -R flutter/bin/cache/artifacts/engine/linux-x64/shader_lib flutter-elinux/flutter/bin/cache/artifacts/engine/linux-arm64
+                rm -rf flutter
+              ;;
+              x86_64)
+                flutter doctor -v
+              ;;
             esac
 
             # build flutter
