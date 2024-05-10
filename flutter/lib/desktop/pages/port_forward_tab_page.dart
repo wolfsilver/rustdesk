@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
@@ -44,6 +43,7 @@ class _PortForwardTabPageState extends State<PortForwardTabPage> {
           key: ValueKey(params['id']),
           id: params['id'],
           password: params['password'],
+          isSharedPassword: params['isSharedPassword'],
           tabController: tabController,
           isRDP: isRDP,
           forceRelay: params['forceRelay'],
@@ -79,6 +79,7 @@ class _PortForwardTabPageState extends State<PortForwardTabPage> {
               key: ValueKey(args['id']),
               id: id,
               password: args['password'],
+              isSharedPassword: args['isSharedPassword'],
               isRDP: isRDP,
               tabController: tabController,
               forceRelay: args['forceRelay'],
@@ -96,22 +97,31 @@ class _PortForwardTabPageState extends State<PortForwardTabPage> {
 
   @override
   Widget build(BuildContext context) {
-    final tabWidget = Container(
-      decoration: BoxDecoration(
-          border: Border.all(color: MyTheme.color(context).border!)),
-      child: Scaffold(
-          backgroundColor: Theme.of(context).colorScheme.background,
-          body: DesktopTab(
-            controller: tabController,
-            onWindowCloseButton: () async {
-              tabController.clear();
-              return true;
-            },
-            tail: AddButton().paddingOnly(left: 10),
-            labelGetter: DesktopTab.tablabelGetter,
-          )),
+    final child = Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.background,
+      body: DesktopTab(
+        controller: tabController,
+        onWindowCloseButton: () async {
+          tabController.clear();
+          return true;
+        },
+        tail: AddButton(),
+        labelGetter: DesktopTab.tablabelGetter,
+      ),
     );
-    return Platform.isMacOS || kUseCompatibleUiMode
+    final tabWidget = isLinux
+        ? buildVirtualWindowFrame(
+            context,
+            Scaffold(
+                backgroundColor: Theme.of(context).colorScheme.background,
+                body: child),
+          )
+        : Container(
+            decoration: BoxDecoration(
+                border: Border.all(color: MyTheme.color(context).border!)),
+            child: child,
+          );
+    return isMacOS || kUseCompatibleUiMode
         ? tabWidget
         : Obx(
             () => SubWindowDragToResizeArea(

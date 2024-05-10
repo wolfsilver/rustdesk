@@ -1,7 +1,11 @@
 use std::{
+    borrow::Cow,
     future::Future,
     sync::{Arc, Mutex, RwLock},
+    task::Poll,
 };
+
+use serde_json::Value;
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum GrabState {
@@ -10,13 +14,6 @@ pub enum GrabState {
     Wait,
     Exit,
 }
-
-#[cfg(not(any(
-    target_os = "android",
-    target_os = "ios",
-    all(target_os = "linux", feature = "unix-file-copy-paste")
-)))]
-pub use arboard::Clipboard as ClipboardContext;
 
 #[cfg(all(target_os = "linux", feature = "unix-file-copy-paste"))]
 static X11_CLIPBOARD: once_cell::sync::OnceCell<x11_clipboard::Clipboard> =
@@ -128,24 +125,32 @@ use hbb_common::compress::decompress;
 use hbb_common::{
     allow_err,
     anyhow::{anyhow, Context},
-    bail,
+    bail, base64,
     bytes::Bytes,
     compress::compress as compress_func,
     config::{self, Config, CONNECT_TIMEOUT, READ_TIMEOUT},
+    futures_util::future::poll_fn,
     get_version_number, log,
     message_proto::*,
-    protobuf::Enum,
-    protobuf::Message as _,
+    protobuf::{Enum, Message as _},
     rendezvous_proto::*,
     socket_client,
     sodiumoxide::crypto::{box_, secretbox, sign},
     tcp::FramedStream,
-    timeout, tokio, ResultType,
+    timeout,
+    tokio::{
+        self,
+        time::{Duration, Instant, Interval},
+    },
+    ResultType,
 };
 // #[cfg(any(target_os = "android", target_os = "ios", feature = "cli"))]
 use hbb_common::{config::RENDEZVOUS_PORT, futures::future::join_all};
 
-use crate::ui_interface::{get_option, set_option};
+use crate::{
+    hbbs_http::create_http_client_async,
+    ui_interface::{get_option, set_option},
+};
 
 pub type NotifyMessageBox = fn(String, String, String, String) -> dyn Future<Output = ()>;
 
@@ -284,14 +289,18 @@ pub fn create_clipboard_msg(content: String) -> Message {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn check_clipboard(
-    ctx: &mut ClipboardContext,
+    ctx: &mut Option<ClipboardContext>,
     old: Option<&Arc<Mutex<String>>>,
 ) -> Option<Message> {
+    if ctx.is_none() {
+        *ctx = ClipboardContext::new().ok();
+    }
+    let ctx2 = ctx.as_mut()?;
     let side = if old.is_none() { "host" } else { "client" };
     let old = if let Some(old) = old { old } else { &CONTENT };
     let content = {
         let _lock = ARBOARD_MTX.lock().unwrap();
-        ctx.get_text()
+        ctx2.get_text()
     };
     if let Ok(content) = content {
         if content.len() < 2_000_000 && !content.is_empty() {
@@ -835,18 +844,16 @@ pub fn refresh_rendezvous_server() {
 }
 
 pub fn run_me<T: AsRef<std::ffi::OsStr>>(args: Vec<T>) -> std::io::Result<std::process::Child> {
-    #[cfg(not(feature = "appimage"))]
-    {
-        let cmd = std::env::current_exe()?;
-        return std::process::Command::new(cmd).args(&args).spawn();
-    }
-    #[cfg(feature = "appimage")]
-    {
-        let appdir = std::env::var("APPDIR").map_err(|_| std::io::ErrorKind::Other)?;
+    #[cfg(target_os = "linux")]
+    if let Ok(appdir) = std::env::var("APPDIR") {
         let appimage_cmd = std::path::Path::new(&appdir).join("AppRun");
-        log::info!("path: {:?}", appimage_cmd);
-        return std::process::Command::new(appimage_cmd).args(&args).spawn();
+        if appimage_cmd.exists() {
+            log::info!("path: {:?}", appimage_cmd);
+            return std::process::Command::new(appimage_cmd).args(&args).spawn();
+        }
     }
+    let cmd = std::env::current_exe()?;
+    return std::process::Command::new(cmd).args(&args).spawn();
 }
 
 #[inline]
@@ -861,7 +868,16 @@ pub fn username() -> String {
 #[inline]
 pub fn hostname() -> String {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    return whoami::hostname();
+    {
+        #[allow(unused_mut)]
+        let mut name = whoami::hostname();
+        // some time, there is .local, some time not, so remove it for osx
+        #[cfg(target_os = "macos")]
+        if name.ends_with(".local") {
+            name = name.trim_end_matches(".local").to_owned();
+        }
+        name
+    }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     return DEVICE_NAME.lock().unwrap().clone();
 }
@@ -959,7 +975,7 @@ pub fn check_software_update() {
 #[tokio::main(flavor = "current_thread")]
 async fn check_software_update_() -> hbb_common::ResultType<()> {
     let url = "https://github.com/rustdesk/rustdesk/releases/latest";
-    let latest_release_response = reqwest::get(url).await?;
+    let latest_release_response = create_http_client_async().get(url).send().await?;
     let latest_release_version = latest_release_response
         .url()
         .path()
@@ -975,8 +991,19 @@ async fn check_software_update_() -> hbb_common::ResultType<()> {
     Ok(())
 }
 
+#[inline]
 pub fn get_app_name() -> String {
     hbb_common::config::APP_NAME.read().unwrap().clone()
+}
+
+#[inline]
+pub fn is_rustdesk() -> bool {
+    hbb_common::config::APP_NAME.read().unwrap().eq("RustDesk")
+}
+
+#[inline]
+pub fn get_uri_prefix() -> String {
+    format!("{}://", get_app_name().to_lowercase())
 }
 
 #[cfg(target_os = "macos")]
@@ -1043,7 +1070,7 @@ pub fn get_audit_server(api: String, custom: String, typ: String) -> String {
 }
 
 pub async fn post_request(url: String, body: String, header: &str) -> ResultType<String> {
-    let mut req = reqwest::Client::new().post(url);
+    let mut req = create_http_client_async().post(url);
     if !header.is_empty() {
         let tmp: Vec<&str> = header.split(": ").collect();
         if tmp.len() == 2 {
@@ -1058,6 +1085,65 @@ pub async fn post_request(url: String, body: String, header: &str) -> ResultType
 #[tokio::main(flavor = "current_thread")]
 pub async fn post_request_sync(url: String, body: String, header: &str) -> ResultType<String> {
     post_request(url, body, header).await
+}
+
+#[tokio::main(flavor = "current_thread")]
+pub async fn http_request_sync(
+    url: String,
+    method: String,
+    body: Option<String>,
+    header: String,
+) -> ResultType<String> {
+    let http_client = create_http_client_async();
+    let mut http_client = match method.as_str() {
+        "get" => http_client.get(url),
+        "post" => http_client.post(url),
+        "put" => http_client.put(url),
+        "delete" => http_client.delete(url),
+        _ => return Err(anyhow!("The HTTP request method is not supported!")),
+    };
+    let v = serde_json::from_str(header.as_str())?;
+
+    if let Value::Object(obj) = v {
+        for (key, value) in obj.iter() {
+            http_client = http_client.header(key, value.as_str().unwrap_or_default());
+        }
+    } else {
+        return Err(anyhow!("HTTP header information parsing failed!"));
+    }
+
+    if let Some(b) = body {
+        http_client = http_client.body(b);
+    }
+
+    let response = http_client
+        .timeout(std::time::Duration::from_secs(12))
+        .send()
+        .await?;
+
+    // Serialize response headers
+    let mut response_headers = serde_json::map::Map::new();
+    for (key, value) in response.headers() {
+        response_headers.insert(
+            key.to_string(),
+            serde_json::json!(value.to_str().unwrap_or("")),
+        );
+    }
+
+    let status_code = response.status().as_u16();
+    let response_body = response.text().await?;
+
+    // Construct the JSON object
+    let mut result = serde_json::map::Map::new();
+    result.insert("status_code".to_string(), serde_json::json!(status_code));
+    result.insert(
+        "headers".to_string(),
+        serde_json::Value::Object(response_headers),
+    );
+    result.insert("body".to_string(), serde_json::json!(response_body));
+
+    // Convert map to JSON string
+    serde_json::to_string(&result).map_err(|e| anyhow!("Failed to serialize response: {}", e))
 }
 
 #[inline]
@@ -1216,8 +1302,14 @@ pub async fn get_next_nonkeyexchange_msg(
     None
 }
 
+#[allow(unused_mut)]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn check_process(arg: &str, same_uid: bool) -> bool {
+pub fn check_process(arg: &str, mut same_uid: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    if !crate::platform::is_root() && !same_uid {
+        log::warn!("Can not get other process's command line arguments on macos without root");
+        same_uid = true;
+    }
     use hbb_common::sysinfo::System;
     let mut sys = System::new();
     sys.refresh_processes();
@@ -1244,8 +1336,13 @@ pub fn check_process(arg: &str, same_uid: bool) -> bool {
         if same_uid && p.user_id() != my_uid {
             continue;
         }
+        // on mac, p.cmd() get "/Applications/RustDesk.app/Contents/MacOS/RustDesk", "XPC_SERVICE_NAME=com.carriez.RustDesk_server"
         let parg = if p.cmd().len() <= 1 { "" } else { &p.cmd()[1] };
-        if arg == parg {
+        if arg.is_empty() {
+            if !parg.starts_with("--") {
+                return true;
+            }
+        } else if arg == parg {
             return true;
         }
     }
@@ -1327,4 +1424,402 @@ pub fn create_symmetric_key_msg(their_pk_b: [u8; 32]) -> (Bytes, Bytes, secretbo
     let nonce = box_::Nonce([0u8; box_::NONCEBYTES]);
     let sealed_key = box_::seal(&key.0, &nonce, &their_pk_b, &out_sk_b);
     (Vec::from(our_pk_b.0).into(), sealed_key.into(), key)
+}
+
+#[inline]
+pub fn using_public_server() -> bool {
+    option_env!("RENDEZVOUS_SERVER").unwrap_or("").is_empty()
+        && crate::get_custom_rendezvous_server(get_option("custom-rendezvous-server")).is_empty()
+}
+
+pub struct ThrottledInterval {
+    interval: Interval,
+    last_tick: Instant,
+    min_interval: Duration,
+}
+
+impl ThrottledInterval {
+    pub fn new(i: Interval) -> ThrottledInterval {
+        let period = i.period();
+        ThrottledInterval {
+            interval: i,
+            last_tick: Instant::now() - period * 2,
+            min_interval: Duration::from_secs_f64(period.as_secs_f64() * 0.9),
+        }
+    }
+
+    pub async fn tick(&mut self) -> Instant {
+        let instant = poll_fn(|cx| self.poll_tick(cx));
+        instant.await
+    }
+
+    pub fn poll_tick(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Instant> {
+        match self.interval.poll_tick(cx) {
+            Poll::Ready(instant) => {
+                if self.last_tick.elapsed() >= self.min_interval {
+                    self.last_tick = Instant::now();
+                    Poll::Ready(instant)
+                } else {
+                    // This call is required since tokio 1.27
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+pub type RustDeskInterval = ThrottledInterval;
+
+#[inline]
+pub fn rustdesk_interval(i: Interval) -> ThrottledInterval {
+    ThrottledInterval::new(i)
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "ios",
+    all(target_os = "linux", feature = "unix-file-copy-paste")
+)))]
+pub struct ClipboardContext(arboard::Clipboard);
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "ios",
+    all(target_os = "linux", feature = "unix-file-copy-paste")
+)))]
+impl ClipboardContext {
+    #[inline]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub fn new() -> ResultType<ClipboardContext> {
+        Ok(ClipboardContext(arboard::Clipboard::new()?))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn new() -> ResultType<ClipboardContext> {
+        let dur = arboard::Clipboard::get_x11_server_conn_timeout();
+        let dur_bak = dur;
+        let _restore_timeout_on_ret = SimpleCallOnReturn {
+            b: true,
+            f: Box::new(move || arboard::Clipboard::set_x11_server_conn_timeout(dur_bak)),
+        };
+
+        for i in 1..4 {
+            arboard::Clipboard::set_x11_server_conn_timeout(dur * i);
+            match arboard::Clipboard::new() {
+                Ok(c) => return Ok(ClipboardContext(c)),
+                Err(arboard::Error::X11ServerConnTimeout) => continue,
+                Err(err) => return Err(err.into()),
+            }
+        }
+        bail!("Failed to create clipboard context, timeout");
+    }
+
+    #[inline]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub fn get_text(&mut self) -> ResultType<String> {
+        Ok(self.0.get_text()?)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn get_text(&mut self) -> ResultType<String> {
+        let dur = arboard::Clipboard::get_x11_server_conn_timeout();
+        let dur_bak = dur;
+        let _restore_timeout_on_ret = SimpleCallOnReturn {
+            b: true,
+            f: Box::new(move || arboard::Clipboard::set_x11_server_conn_timeout(dur_bak)),
+        };
+
+        for i in 1..4 {
+            arboard::Clipboard::set_x11_server_conn_timeout(dur * i);
+            match self.0.get_text() {
+                Ok(s) => return Ok(s),
+                Err(arboard::Error::X11ServerConnTimeout) => continue,
+                Err(err) => return Err(err.into()),
+            }
+        }
+        bail!("Failed to get text, timeout");
+    }
+
+    #[inline]
+    pub fn set_text<'a, T: Into<Cow<'a, str>>>(&mut self, text: T) -> ResultType<()> {
+        self.0.set_text(text)?;
+        Ok(())
+    }
+}
+
+pub fn load_custom_client() {
+    #[cfg(debug_assertions)]
+    if let Ok(data) = std::fs::read_to_string("./custom.txt") {
+        read_custom_client(data.trim());
+        return;
+    }
+    let Some(path) = std::env::current_exe().map_or(None, |x| x.parent().map(|x| x.to_path_buf()))
+    else {
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    let path = path.join("../Resources");
+    let path = path.join("custom.txt");
+    if path.is_file() {
+        let Ok(data) = std::fs::read_to_string(&path) else {
+            log::error!("Failed to read custom client config");
+            return;
+        };
+        read_custom_client(&data.trim());
+    }
+}
+
+pub fn read_custom_client(config: &str) {
+    let Ok(data) = decode64(config) else {
+        log::error!("Failed to decode custom client config");
+        return;
+    };
+    const KEY: &str = "5Qbwsde3unUcJBtrx9ZkvUmwFNoExHzpryHuPUdqlWM=";
+    let Some(pk) = get_rs_pk(KEY) else {
+        log::error!("Failed to parse public key of custom client");
+        return;
+    };
+    let Ok(data) = sign::verify(&data, &pk) else {
+        log::error!("Failed to dec custom client config");
+        return;
+    };
+    let Ok(mut data) =
+        serde_json::from_slice::<std::collections::HashMap<String, serde_json::Value>>(&data)
+    else {
+        log::error!("Failed to parse custom client config");
+        return;
+    };
+
+    if let Some(app_name) = data.remove("app-name") {
+        if let Some(app_name) = app_name.as_str() {
+            *config::APP_NAME.write().unwrap() = app_name.to_owned();
+        }
+    }
+    if let Some(default_settings) = data.remove("default-settings") {
+        if let Some(default_settings) = default_settings.as_object() {
+            for (k, v) in default_settings {
+                let Some(v) = v.as_str() else {
+                    continue;
+                };
+                if k.starts_with("$$") {
+                    config::DEFAULT_DISPLAY_SETTINGS
+                        .write()
+                        .unwrap()
+                        .insert(k.clone(), v[2..].to_owned());
+                } else if k.starts_with("$") {
+                    config::DEFAULT_LOCAL_SETTINGS
+                        .write()
+                        .unwrap()
+                        .insert(k.clone(), v[1..].to_owned());
+                } else {
+                    config::DEFAULT_SETTINGS
+                        .write()
+                        .unwrap()
+                        .insert(k.clone(), v.to_owned());
+                }
+            }
+        }
+    }
+    if let Some(overwrite_settings) = data.remove("override-settings") {
+        if let Some(overwrite_settings) = overwrite_settings.as_object() {
+            for (k, v) in overwrite_settings {
+                let Some(v) = v.as_str() else {
+                    continue;
+                };
+                if k.starts_with("$$") {
+                    config::OVERWRITE_DISPLAY_SETTINGS
+                        .write()
+                        .unwrap()
+                        .insert(k.clone(), v[2..].to_owned());
+                } else if k.starts_with("$") {
+                    config::OVERWRITE_LOCAL_SETTINGS
+                        .write()
+                        .unwrap()
+                        .insert(k.clone(), v[1..].to_owned());
+                } else {
+                    config::OVERWRITE_SETTINGS
+                        .write()
+                        .unwrap()
+                        .insert(k.clone(), v.to_owned());
+                }
+            }
+        }
+    }
+    for (k, v) in data {
+        if let Some(v) = v.as_str() {
+            config::HARD_SETTINGS
+                .write()
+                .unwrap()
+                .insert(k, v.to_owned());
+        };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbb_common::tokio::{
+        self,
+        time::{interval, interval_at, sleep, Duration, Instant, Interval},
+    };
+    use std::collections::HashSet;
+
+    #[inline]
+    fn get_timestamp_secs() -> u128 {
+        (std::time::SystemTime::UNIX_EPOCH
+            .elapsed()
+            .unwrap()
+            .as_millis()
+            + 500)
+            / 1000
+    }
+
+    fn interval_maker() -> Interval {
+        interval(Duration::from_secs(1))
+    }
+
+    fn interval_at_maker() -> Interval {
+        interval_at(
+            Instant::now() + Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+    }
+
+    // ThrottledInterval tick at the same time as tokio interval, if no sleeps
+    #[allow(non_snake_case)]
+    #[tokio::test]
+    async fn test_RustDesk_interval() {
+        let base_intervals = [interval_maker, interval_at_maker];
+        for maker in base_intervals.into_iter() {
+            let mut tokio_timer = maker();
+            let mut tokio_times = Vec::new();
+            let mut timer = rustdesk_interval(maker());
+            let mut times = Vec::new();
+            loop {
+                tokio::select! {
+                    _ = timer.tick() => {
+                        if tokio_times.len() >= 10 && times.len() >= 10 {
+                            break;
+                        }
+                        times.push(get_timestamp_secs());
+                    }
+                    _ = tokio_timer.tick() => {
+                        if tokio_times.len() >= 10 && times.len() >= 10 {
+                            break;
+                        }
+                        tokio_times.push(get_timestamp_secs());
+                    }
+                }
+            }
+            assert_eq!(times, tokio_times);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tokio_time_interval_sleep() {
+        let mut timer = interval_maker();
+        let mut times = Vec::new();
+        sleep(Duration::from_secs(3)).await;
+        loop {
+            tokio::select! {
+                _ = timer.tick() => {
+                    times.push(get_timestamp_secs());
+                    if times.len() == 5 {
+                        break;
+                    }
+                }
+            }
+        }
+        let times2: HashSet<u128> = HashSet::from_iter(times.clone());
+        assert_eq!(times.len(), times2.len() + 3);
+    }
+
+    // ThrottledInterval tick less times than tokio interval, if there're sleeps
+    #[allow(non_snake_case)]
+    #[tokio::test]
+    async fn test_RustDesk_interval_sleep() {
+        let base_intervals = [interval_maker, interval_at_maker];
+        for (i, maker) in base_intervals.into_iter().enumerate() {
+            let mut timer = rustdesk_interval(maker());
+            let mut times = Vec::new();
+            sleep(Duration::from_secs(3)).await;
+            loop {
+                tokio::select! {
+                    _ = timer.tick() => {
+                        times.push(get_timestamp_secs());
+                        if times.len() == 5 {
+                            break;
+                        }
+                    }
+                }
+            }
+            // No multiple ticks in the `interval` time.
+            // Values in "times" are unique and are less than normal tokio interval.
+            // See previous test (test_tokio_time_interval_sleep) for comparison.
+            let times2: HashSet<u128> = HashSet::from_iter(times.clone());
+            assert_eq!(times.len(), times2.len(), "test: {}", i);
+        }
+    }
+
+    #[test]
+    fn test_duration_multiplication() {
+        let dur = Duration::from_secs(1);
+
+        assert_eq!(dur * 2, Duration::from_secs(2));
+        assert_eq!(
+            Duration::from_secs_f64(dur.as_secs_f64() * 0.9),
+            Duration::from_millis(900)
+        );
+        assert_eq!(
+            Duration::from_secs_f64(dur.as_secs_f64() * 0.923),
+            Duration::from_millis(923)
+        );
+        assert_eq!(
+            Duration::from_secs_f64(dur.as_secs_f64() * 0.923 * 1e-3),
+            Duration::from_micros(923)
+        );
+        assert_eq!(
+            Duration::from_secs_f64(dur.as_secs_f64() * 0.923 * 1e-6),
+            Duration::from_nanos(923)
+        );
+        assert_eq!(
+            Duration::from_secs_f64(dur.as_secs_f64() * 0.923 * 1e-9),
+            Duration::from_nanos(1)
+        );
+        assert_eq!(
+            Duration::from_secs_f64(dur.as_secs_f64() * 0.5 * 1e-9),
+            Duration::from_nanos(1)
+        );
+        assert_eq!(
+            Duration::from_secs_f64(dur.as_secs_f64() * 0.499 * 1e-9),
+            Duration::from_nanos(0)
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "ios",
+        all(target_os = "linux", feature = "unix-file-copy-paste")
+    )))]
+    async fn test_clipboard_context() {
+        #[cfg(target_os = "linux")]
+        let dur = {
+            let dur = Duration::from_micros(500);
+            arboard::Clipboard::set_x11_server_conn_timeout(dur);
+            dur
+        };
+
+        let _ctx = ClipboardContext::new();
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                arboard::Clipboard::get_x11_server_conn_timeout(),
+                dur,
+                "Failed to restore x11 server conn timeout"
+            );
+        }
+    }
 }

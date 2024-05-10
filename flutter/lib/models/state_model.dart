@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
@@ -16,12 +14,13 @@ class StateGlobal {
   bool _isMinimized = false;
   final RxBool isMaximized = false.obs;
   final RxBool _showTabBar = true.obs;
-  final RxDouble _resizeEdgeSize = RxDouble(kWindowEdgeSize);
+  final RxDouble _resizeEdgeSize = RxDouble(windowEdgeSize);
   final RxDouble _windowBorderWidth = RxDouble(kWindowBorderWidth);
   final RxBool showRemoteToolBar = false.obs;
   final svcStatus = SvcStatus.notReady.obs;
   // Only used for macOS
   bool? closeOnFullscreen;
+  final RxBool isFocused = false.obs;
 
   String _inputSource = '';
 
@@ -57,10 +56,9 @@ class StateGlobal {
     if (!_fullscreen.isTrue) {
       if (isMaximized.value != v) {
         isMaximized.value = v;
-        _resizeEdgeSize.value =
-            isMaximized.isTrue ? kMaximizeEdgeSize : kWindowEdgeSize;
+        refreshResizeEdgeSize();
       }
-      if (!Platform.isMacOS) {
+      if (!isMacOS) {
         _windowBorderWidth.value = v ? 0 : kWindowBorderWidth;
       }
     }
@@ -72,11 +70,7 @@ class StateGlobal {
     if (_fullscreen.value != v) {
       _fullscreen.value = v;
       _showTabBar.value = !_fullscreen.value;
-      _resizeEdgeSize.value = fullscreen.isTrue
-          ? kFullScreenEdgeSize
-          : isMaximized.isTrue
-              ? kMaximizeEdgeSize
-              : kWindowEdgeSize;
+      refreshResizeEdgeSize();
       print(
           "fullscreen: $fullscreen, resizeEdgeSize: ${_resizeEdgeSize.value}");
       _windowBorderWidth.value = fullscreen.isTrue ? 0 : kWindowBorderWidth;
@@ -84,7 +78,7 @@ class StateGlobal {
         final wc = WindowController.fromWindowId(windowId);
         wc.setFullscreen(_fullscreen.isTrue).then((_) {
           // https://github.com/leanflutter/window_manager/issues/131#issuecomment-1111587982
-          if (Platform.isWindows && !v) {
+          if (isWindows && !v) {
             Future.delayed(Duration.zero, () async {
               final frame = await wc.getFrame();
               final newRect = Rect.fromLTWH(
@@ -96,6 +90,12 @@ class StateGlobal {
       }
     }
   }
+
+  refreshResizeEdgeSize() => _resizeEdgeSize.value = fullscreen.isTrue
+      ? kFullScreenEdgeSize
+      : isMaximized.isTrue
+          ? kMaximizeEdgeSize
+          : windowEdgeSize;
 
   String getInputSource({bool force = false}) {
     if (force || _inputSource.isEmpty) {
@@ -114,4 +114,5 @@ class StateGlobal {
   static final StateGlobal instance = StateGlobal._();
 }
 
+// This final variable is initialized when the first time it is accessed.
 final stateGlobal = StateGlobal.instance;

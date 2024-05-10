@@ -49,6 +49,16 @@ pub fn is_x11_or_headless() -> bool {
 const INVALID_SESSION: &str = "4294967295";
 
 pub fn get_display_server() -> String {
+    // Check for forced display server environment variable first
+    if let Ok(forced_display) = std::env::var("RUSTDESK_FORCED_DISPLAY_SERVER") {
+        return forced_display;
+    }
+
+    // Check if `loginctl` can be called successfully
+    if run_loginctl(None).is_err() {
+        return DISPLAY_SERVER_X11.to_owned();
+    }
+
     let mut session = get_values_of_seat0(&[0])[0].clone();
     if session.is_empty() {
         // loginctl has not given the expected output.  try something else.
@@ -64,7 +74,7 @@ pub fn get_display_server() -> String {
         }
     }
     if session.is_empty() {
-        "".to_owned()
+        std::env::var("XDG_SESSION_TYPE").unwrap_or("x11".to_owned())
     } else {
         get_display_server_of_session(&session)
     }
@@ -192,6 +202,8 @@ pub fn is_active_and_seat0(sid: &str) -> bool {
     }
 }
 
+// **Note** that the return value here, the last character is '\n'.
+// Use `run_cmds_trim_newline()` if you want to remove '\n' at the end.
 pub fn run_cmds(cmds: &str) -> ResultType<String> {
     let output = std::process::Command::new("sh")
         .args(vec!["-c", cmds])
@@ -199,24 +211,36 @@ pub fn run_cmds(cmds: &str) -> ResultType<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-#[cfg(not(feature = "flatpak"))]
+pub fn run_cmds_trim_newline(cmds: &str) -> ResultType<String> {
+    let output = std::process::Command::new("sh")
+        .args(vec!["-c", cmds])
+        .output()?;
+    let out = String::from_utf8_lossy(&output.stdout);
+    Ok(if out.ends_with('\n') {
+        out[..out.len() - 1].to_string()
+    } else {
+        out.to_string()
+    })
+}
+
 fn run_loginctl(args: Option<Vec<&str>>) -> std::io::Result<std::process::Output> {
+    if std::env::var("FLATPAK_ID").is_ok() {
+        let mut l_args = String::from("loginctl");
+        if let Some(a) = args.as_ref() {
+            l_args = format!("{} {}", l_args, a.join(" "));
+        }
+        let res = std::process::Command::new("flatpak-spawn")
+            .args(vec![String::from("--host"), l_args])
+            .output();
+        if res.is_ok() {
+            return res;
+        }
+    }
     let mut cmd = std::process::Command::new("loginctl");
     if let Some(a) = args {
         return cmd.args(a).output();
     }
     cmd.output()
-}
-
-#[cfg(feature = "flatpak")]
-fn run_loginctl(args: Option<Vec<&str>>) -> std::io::Result<std::process::Output> {
-    let mut l_args = String::from("loginctl");
-    if let Some(a) = args {
-        l_args = format!("{} {}", l_args, a.join(" "));
-    }
-    std::process::Command::new("flatpak-spawn")
-        .args(vec![String::from("--host"), l_args])
-        .output()
 }
 
 /// forever: may not work
@@ -256,4 +280,19 @@ pub fn system_message(title: &str, msg: &str, forever: bool) -> ResultType<()> {
         }
     }
     crate::bail!("failed to post system message");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_run_cmds_trim_newline() {
+        assert_eq!(run_cmds_trim_newline("echo -n 123").unwrap(), "123");
+        assert_eq!(run_cmds_trim_newline("echo 123").unwrap(), "123");
+        assert_eq!(
+            run_cmds_trim_newline("whoami").unwrap() + "\n",
+            run_cmds("whoami").unwrap()
+        );
+    }
 }
