@@ -209,10 +209,12 @@ List<Widget> ServerConfigImportExportWidgets(
 List<(String, String)> otherDefaultSettings() {
   List<(String, String)> v = [
     ('View Mode', 'view_only'),
-    if (isDesktop) ('show_monitors_tip', kKeyShowMonitorsToolbar),
-    if (isDesktop) ('Collapse toolbar', 'collapse_toolbar'),
+    if ((isDesktop || isWebDesktop)) ('show_monitors_tip', kKeyShowMonitorsToolbar),
+    if ((isDesktop || isWebDesktop)) ('Collapse toolbar', 'collapse_toolbar'),
     ('Show remote cursor', 'show_remote_cursor'),
-    if (isDesktop) ('Zoom cursor', 'zoom-cursor'),
+    ('Follow remote cursor', 'follow_remote_cursor'),
+    ('Follow remote window focus', 'follow_remote_window'),
+    if ((isDesktop || isWebDesktop)) ('Zoom cursor', 'zoom-cursor'),
     ('Show quality monitor', 'show_quality_monitor'),
     ('Mute', 'disable_audio'),
     if (isDesktop) ('Enable file copy and paste', 'enable_file_transfer'),
@@ -221,7 +223,7 @@ List<(String, String)> otherDefaultSettings() {
     ('Privacy mode', 'privacy_mode'),
     if (isMobile) ('Touch mode', 'touch-mode'),
     ('True color (4:4:4)', 'i444'),
-    ('Reverse mouse wheel', 'reverse_mouse_wheel'),
+    ('Reverse mouse wheel', kKeyReverseMouseWheel),
     ('swap-left-right-mouse', 'swap-left-right-mouse'),
     if (isDesktop && useTextureRender)
       (

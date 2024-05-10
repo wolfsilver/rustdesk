@@ -1,27 +1,29 @@
 use crate::{
-    codec::{base_bitrate, codec_thread_num, EncoderApi, EncoderCfg, Quality as Q},
-    hw, EncodeInput, ImageFormat, ImageRgb, Pixfmt, HW_STRIDE_ALIGN,
+    codec::{
+        base_bitrate, codec_thread_num, enable_hwcodec_option, EncoderApi, EncoderCfg, Quality as Q,
+    },
+    hw, CodecFormat, EncodeInput, ImageFormat, ImageRgb, Pixfmt, HW_STRIDE_ALIGN,
 };
 use hbb_common::{
-    allow_err,
-    anyhow::{anyhow, Context},
+    anyhow::{anyhow, bail, Context},
     bytes::Bytes,
     config::HwCodecConfig,
     log,
     message_proto::{EncodedVideoFrame, EncodedVideoFrames, VideoFrame},
-    ResultType,
+    serde_derive::{Deserialize, Serialize},
+    serde_json, ResultType,
 };
 use hwcodec::{
-    decode::{DecodeContext, DecodeFrame, Decoder},
-    encode::{EncodeContext, EncodeFrame, Encoder},
-    ffmpeg::{CodecInfo, CodecInfos, DataFormat},
-    AVPixelFormat,
-    Quality::{self, *},
-    RateControl::{self, *},
+    common::DataFormat,
+    ffmpeg::AVPixelFormat,
+    ffmpeg_ram::{
+        decode::{DecodeContext, DecodeFrame, Decoder},
+        encode::{EncodeContext, EncodeFrame, Encoder},
+        CodecInfo,
+        Quality::{self, *},
+        RateControl::{self, *},
+    },
 };
-
-const CFG_KEY_ENCODER: &str = "bestHwEncoders";
-const CFG_KEY_DECODER: &str = "bestHwDecoders";
 
 const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
 pub const DEFAULT_TIME_BASE: [i32; 2] = [1, 30];
@@ -30,7 +32,7 @@ const DEFAULT_HW_QUALITY: Quality = Quality_Default;
 const DEFAULT_RC: RateControl = RC_DEFAULT;
 
 #[derive(Debug, Clone)]
-pub struct HwEncoderConfig {
+pub struct HwRamEncoderConfig {
     pub name: String,
     pub width: usize,
     pub height: usize,
@@ -38,7 +40,7 @@ pub struct HwEncoderConfig {
     pub keyframe_interval: Option<usize>,
 }
 
-pub struct HwEncoder {
+pub struct HwRamEncoder {
     encoder: Encoder,
     name: String,
     pub format: DataFormat,
@@ -48,13 +50,13 @@ pub struct HwEncoder {
     bitrate: u32, //kbs
 }
 
-impl EncoderApi for HwEncoder {
+impl EncoderApi for HwRamEncoder {
     fn new(cfg: EncoderCfg, _i444: bool) -> ResultType<Self>
     where
         Self: Sized,
     {
         match cfg {
-            EncoderCfg::HW(config) => {
+            EncoderCfg::HWRAM(config) => {
                 let b = Self::convert_quality(config.quality);
                 let base_bitrate = base_bitrate(config.width as _, config.height as _);
                 let mut bitrate = base_bitrate * b / 100;
@@ -85,7 +87,7 @@ impl EncoderApi for HwEncoder {
                     }
                 };
                 match Encoder::new(ctx.clone()) {
-                    Ok(encoder) => Ok(HwEncoder {
+                    Ok(encoder) => Ok(HwRamEncoder {
                         encoder,
                         name: config.name,
                         format,
@@ -123,6 +125,7 @@ impl EncoderApi for HwEncoder {
             match self.format {
                 DataFormat::H264 => vf.set_h264s(frames),
                 DataFormat::H265 => vf.set_h265s(frames),
+                _ => bail!("unsupported format: {:?}", self.format),
             }
             Ok(vf)
         } else {
@@ -157,7 +160,7 @@ impl EncoderApi for HwEncoder {
         }
     }
 
-    #[cfg(feature = "gpucodec")]
+    #[cfg(feature = "vram")]
     fn input_texture(&self) -> bool {
         false
     }
@@ -177,16 +180,30 @@ impl EncoderApi for HwEncoder {
     }
 
     fn support_abr(&self) -> bool {
-        !self.name.contains("qsv")
+        ["qsv", "vaapi"].iter().all(|&x| !self.name.contains(x))
     }
 }
 
-impl HwEncoder {
-    pub fn best() -> CodecInfos {
-        get_config(CFG_KEY_ENCODER).unwrap_or(CodecInfos {
-            h264: None,
-            h265: None,
-        })
+impl HwRamEncoder {
+    pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
+        let mut info = None;
+        if let Ok(hw) = get_config().map(|c| c.e) {
+            let best = CodecInfo::prioritized(hw);
+            match format {
+                CodecFormat::H264 => {
+                    if let Some(v) = best.h264 {
+                        info = Some(v);
+                    }
+                }
+                CodecFormat::H265 => {
+                    if let Some(v) = best.h265 {
+                        info = Some(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        info
     }
 
     pub fn encode(&mut self, yuv: &[u8]) -> ResultType<Vec<EncodeFrame>> {
@@ -211,73 +228,81 @@ impl HwEncoder {
     }
 }
 
-pub struct HwDecoder {
+pub struct HwRamDecoder {
     decoder: Decoder,
     pub info: CodecInfo,
 }
 
-#[derive(Default)]
-pub struct HwDecoders {
-    pub h264: Option<HwDecoder>,
-    pub h265: Option<HwDecoder>,
-}
-
-impl HwDecoder {
-    pub fn best() -> CodecInfos {
-        get_config(CFG_KEY_DECODER).unwrap_or(CodecInfos {
-            h264: None,
-            h265: None,
-        })
-    }
-
-    pub fn new_decoders() -> HwDecoders {
-        let best = HwDecoder::best();
-        let mut h264: Option<HwDecoder> = None;
-        let mut h265: Option<HwDecoder> = None;
-        let mut fail = false;
-
-        if let Some(info) = best.h264 {
-            h264 = HwDecoder::new(info).ok();
-            if h264.is_none() {
-                fail = true;
+impl HwRamDecoder {
+    pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
+        let mut info = None;
+        let soft = CodecInfo::soft();
+        match format {
+            CodecFormat::H264 => {
+                if let Some(v) = soft.h264 {
+                    info = Some(v);
+                }
+            }
+            CodecFormat::H265 => {
+                if let Some(v) = soft.h265 {
+                    info = Some(v);
+                }
+            }
+            _ => {}
+        }
+        if enable_hwcodec_option() {
+            if let Ok(hw) = get_config().map(|c| c.d) {
+                let best = CodecInfo::prioritized(hw);
+                match format {
+                    CodecFormat::H264 => {
+                        if let Some(v) = best.h264 {
+                            info = Some(v);
+                        }
+                    }
+                    CodecFormat::H265 => {
+                        if let Some(v) = best.h265 {
+                            info = Some(v);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
-        if let Some(info) = best.h265 {
-            h265 = HwDecoder::new(info).ok();
-            if h265.is_none() {
-                fail = true;
-            }
-        }
-        if fail {
-            hwcodec_new_check_process();
-        }
-        HwDecoders { h264, h265 }
+        info
     }
 
-    pub fn new(info: CodecInfo) -> ResultType<Self> {
+    pub fn new(format: CodecFormat) -> ResultType<Self> {
+        let info = HwRamDecoder::try_get(format);
+        log::info!("try create {info:?} ram decoder");
+        let Some(info) = info else {
+            bail!("unsupported format: {:?}", format);
+        };
         let ctx = DecodeContext {
             name: info.name.clone(),
             device_type: info.hwdevice.clone(),
             thread_count: codec_thread_num(16) as _,
         };
         match Decoder::new(ctx) {
-            Ok(decoder) => Ok(HwDecoder { decoder, info }),
-            Err(_) => Err(anyhow!(format!("Failed to create decoder"))),
+            Ok(decoder) => Ok(HwRamDecoder { decoder, info }),
+            Err(_) => {
+                HwCodecConfig::clear_ram();
+                Err(anyhow!(format!("Failed to create decoder")))
+            }
         }
     }
-    pub fn decode(&mut self, data: &[u8]) -> ResultType<Vec<HwDecoderImage>> {
+    pub fn decode(&mut self, data: &[u8]) -> ResultType<Vec<HwRamDecoderImage>> {
         match self.decoder.decode(data) {
-            Ok(v) => Ok(v.iter().map(|f| HwDecoderImage { frame: f }).collect()),
+            Ok(v) => Ok(v.iter().map(|f| HwRamDecoderImage { frame: f }).collect()),
             Err(e) => Err(anyhow!(e)),
         }
     }
 }
 
-pub struct HwDecoderImage<'a> {
+pub struct HwRamDecoderImage<'a> {
     frame: &'a DecodeFrame,
 }
 
-impl HwDecoderImage<'_> {
+impl HwRamDecoderImage<'_> {
     // rgb [in/out] fmt and stride must be set in ImageRgb
     pub fn to_fmt(&self, rgb: &mut ImageRgb, i420: &mut Vec<u8>) -> ResultType<()> {
         let frame = self.frame;
@@ -331,23 +356,24 @@ impl HwDecoderImage<'_> {
     }
 }
 
-fn get_config(k: &str) -> ResultType<CodecInfos> {
-    let v = HwCodecConfig::load()
-        .options
-        .get(k)
-        .unwrap_or(&"".to_owned())
-        .to_owned();
-    match CodecInfos::deserialize(&v) {
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+struct Available {
+    e: Vec<CodecInfo>,
+    d: Vec<CodecInfo>,
+}
+
+fn get_config() -> ResultType<Available> {
+    match serde_json::from_str(&HwCodecConfig::load().ram) {
         Ok(v) => Ok(v),
-        Err(_) => Err(anyhow!("Failed to get config:{}", k)),
+        Err(e) => Err(anyhow!("Failed to get config:{e:?}")),
     }
 }
 
 pub fn check_available_hwcodec() {
     let ctx = EncodeContext {
         name: String::from(""),
-        width: 1920,
-        height: 1080,
+        width: 1280,
+        height: 720,
         pixfmt: DEFAULT_PIXFMT,
         align: HW_STRIDE_ALIGN as _,
         bitrate: 0,
@@ -357,30 +383,25 @@ pub fn check_available_hwcodec() {
         rc: DEFAULT_RC,
         thread_count: 4,
     };
-    let encoders = CodecInfo::score(Encoder::available_encoders(ctx));
-    let decoders = CodecInfo::score(Decoder::available_decoders());
-
-    if let Ok(old_encoders) = get_config(CFG_KEY_ENCODER) {
-        if let Ok(old_decoders) = get_config(CFG_KEY_DECODER) {
-            if encoders == old_encoders && decoders == old_decoders {
-                return;
-            }
-        }
+    #[cfg(feature = "vram")]
+    let vram = crate::vram::check_available_vram();
+    #[cfg(not(feature = "vram"))]
+    let vram = "".to_owned();
+    let ram = Available {
+        e: Encoder::available_encoders(ctx, Some(vram.clone())),
+        d: Decoder::available_decoders(Some(vram.clone())),
+    };
+    if let Ok(ram) = serde_json::to_string_pretty(&ram) {
+        HwCodecConfig { ram, vram }.store();
     }
-
-    if let Ok(encoders) = encoders.serialize() {
-        if let Ok(decoders) = decoders.serialize() {
-            let mut config = HwCodecConfig::load();
-            config.options.insert(CFG_KEY_ENCODER.to_owned(), encoders);
-            config.options.insert(CFG_KEY_DECODER.to_owned(), decoders);
-            config.store();
-            return;
-        }
-    }
-    log::error!("Failed to serialize codec info");
 }
 
-pub fn hwcodec_new_check_process() {
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub fn start_check_process(force: bool) {
+    if !force && !enable_hwcodec_option() {
+        return;
+    }
+    use hbb_common::allow_err;
     use std::sync::Once;
     let f = || {
         // Clear to avoid checking process errors
@@ -420,7 +441,11 @@ pub fn hwcodec_new_check_process() {
         };
     };
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
+    if force && ONCE.is_completed() {
         std::thread::spawn(f);
-    });
+    } else {
+        ONCE.call_once(|| {
+            std::thread::spawn(f);
+        });
+    }
 }

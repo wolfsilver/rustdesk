@@ -1,7 +1,7 @@
 use super::*;
 #[cfg(target_os = "linux")]
 use crate::platform::linux::is_x11;
-#[cfg(all(windows, feature = "virtual_display_driver"))]
+#[cfg(windows)]
 use crate::virtual_display_manager;
 #[cfg(windows)]
 use hbb_common::get_version_number;
@@ -12,7 +12,7 @@ use scrap::Display;
 
 pub const NAME: &'static str = "display";
 
-#[cfg(all(windows, feature = "virtual_display_driver"))]
+#[cfg(windows)]
 const DUMMY_DISPLAY_SIDE_MAX_SIZE: usize = 1024;
 
 struct ChangedResolution {
@@ -24,7 +24,7 @@ lazy_static::lazy_static! {
     static ref IS_CAPTURER_MAGNIFIER_SUPPORTED: bool = is_capturer_mag_supported();
     static ref CHANGED_RESOLUTIONS: Arc<RwLock<HashMap<String, ChangedResolution>>> = Default::default();
     // Initial primary display index.
-    // It should should not be updated when displays changed.
+    // It should not be updated when displays changed.
     pub static ref PRIMARY_DISPLAY_IDX: usize = get_primary();
     static ref SYNC_DISPLAYS: Arc<Mutex<SyncDisplaysInfo>> = Default::default();
 }
@@ -80,8 +80,8 @@ pub(super) fn check_display_changed(
     let lock = SYNC_DISPLAYS.lock().unwrap();
     // If plugging out a monitor && lock.displays.get(idx) is None.
     //  1. The client version < 1.2.4. The client side has to reconnect.
-    //  2. The client version > 1.2.4, The client side can handle the case becuase sync peer info message will be sent.
-    // But it is acceptable to for the user to reconnect manually, becuase the monitor is unplugged.
+    //  2. The client version > 1.2.4, The client side can handle the case because sync peer info message will be sent.
+    // But it is acceptable to for the user to reconnect manually, because the monitor is unplugged.
     let d = lock.displays.get(idx)?;
     if ndisplay != lock.displays.len() {
         return Some(d.clone());
@@ -122,6 +122,8 @@ pub fn reset_resolutions() {
             );
         }
     }
+    // Can be cleared because reset resolutions is called when there is no client connected.
+    CHANGED_RESOLUTIONS.write().unwrap().clear();
 }
 
 #[inline]
@@ -156,17 +158,10 @@ fn displays_to_msg(displays: Vec<DisplayInfo>) -> Message {
     };
     pi.displays = displays.clone();
 
-    #[cfg(all(windows, feature = "virtual_display_driver"))]
+    #[cfg(windows)]
     if crate::platform::is_installed() {
-        let virtual_displays = crate::virtual_display_manager::get_virtual_displays();
-        if !virtual_displays.is_empty() {
-            let mut platform_additions = serde_json::Map::new();
-            platform_additions.insert(
-                "virtual_displays".into(),
-                serde_json::json!(&virtual_displays),
-            );
-            pi.platform_additions = serde_json::to_string(&platform_additions).unwrap_or("".into());
-        }
+        let m = crate::virtual_display_manager::get_platform_additions();
+        pi.platform_additions = serde_json::to_string(&m).unwrap_or_default();
     }
 
     // current_display should not be used in server.
@@ -224,20 +219,25 @@ pub(super) fn get_original_resolution(
     w: usize,
     h: usize,
 ) -> MessageField<Resolution> {
-    #[cfg(all(windows, feature = "virtual_display_driver"))]
-    let is_virtual_display = crate::virtual_display_manager::is_virtual_display(&display_name);
-    #[cfg(not(all(windows, feature = "virtual_display_driver")))]
-    let is_virtual_display = false;
-    Some(if is_virtual_display {
+    #[cfg(windows)]
+    let is_rustdesk_virtual_display =
+        crate::virtual_display_manager::rustdesk_idd::is_virtual_display(&display_name);
+    #[cfg(not(windows))]
+    let is_rustdesk_virtual_display = false;
+    Some(if is_rustdesk_virtual_display {
         Resolution {
             width: 0,
             height: 0,
             ..Default::default()
         }
     } else {
-        let mut changed_resolutions = CHANGED_RESOLUTIONS.write().unwrap();
+        let changed_resolutions = CHANGED_RESOLUTIONS.write().unwrap();
         let (width, height) = match changed_resolutions.get(display_name) {
             Some(res) => {
+                res.original
+                /*
+                The resolution change may not happen immediately, `changed` has been updated,
+                but the actual resolution is old, it will be mistaken for a third-party change.
                 if res.changed.0 != w as i32 || res.changed.1 != h as i32 {
                     // If the resolution is changed by third process, remove the record in changed_resolutions.
                     changed_resolutions.remove(display_name);
@@ -245,6 +245,7 @@ pub(super) fn get_original_resolution(
                 } else {
                     res.original
                 }
+                */
             }
             None => (w as _, h as _),
         };
@@ -257,7 +258,6 @@ pub(super) fn get_original_resolution(
     .into()
 }
 
-#[cfg(target_os = "linux")]
 pub(super) fn get_sync_displays() -> Vec<DisplayInfo> {
     SYNC_DISPLAYS.lock().unwrap().displays.clone()
 }
@@ -273,7 +273,18 @@ pub(super) fn check_update_displays(all: &Vec<Display>) {
         .iter()
         .map(|d| {
             let display_name = d.name();
-            let original_resolution = get_original_resolution(&display_name, d.width(), d.height());
+            #[allow(unused_assignments)]
+            #[allow(unused_mut)]
+            let mut scale = 1.0;
+            #[cfg(target_os = "macos")]
+            {
+                scale = d.scale();
+            }
+            let original_resolution = get_original_resolution(
+                &display_name,
+                ((d.width() as f64) / scale).round() as usize,
+                (d.height() as f64 / scale).round() as usize,
+            );
             DisplayInfo {
                 x: d.origin().0 as _,
                 y: d.origin().1 as _,
@@ -283,6 +294,7 @@ pub(super) fn check_update_displays(all: &Vec<Display>) {
                 online: d.is_online(),
                 cursor_embedded: false,
                 original_resolution,
+                scale,
                 ..Default::default()
             }
         })
@@ -330,7 +342,7 @@ pub fn get_primary_2(all: &Vec<Display>) -> usize {
 }
 
 #[inline]
-#[cfg(all(windows, feature = "virtual_display_driver"))]
+#[cfg(windows)]
 fn no_displays(displays: &Vec<Display>) -> bool {
     let display_len = displays.len();
     if display_len == 0 {
@@ -355,18 +367,52 @@ fn no_displays(displays: &Vec<Display>) -> bool {
 }
 
 #[inline]
-#[cfg(not(all(windows, feature = "virtual_display_driver")))]
+#[cfg(not(windows))]
 pub fn try_get_displays() -> ResultType<Vec<Display>> {
     Ok(Display::all()?)
 }
 
-#[cfg(all(windows, feature = "virtual_display_driver"))]
+#[inline]
+#[cfg(windows)]
 pub fn try_get_displays() -> ResultType<Vec<Display>> {
+    try_get_displays_(false)
+}
+
+// We can't get full control of the virtual display if we use amyuni idd.
+// If we add a virtual display, we cannot remove it automatically.
+// So when using amyuni idd, we only add a virtual display for headless if it is required.
+// eg. when the client is connecting.
+#[inline]
+#[cfg(windows)]
+pub fn try_get_displays_add_amyuni_headless() -> ResultType<Vec<Display>> {
+    try_get_displays_(true)
+}
+
+#[inline]
+#[cfg(windows)]
+pub fn try_get_displays_(add_amyuni_headless: bool) -> ResultType<Vec<Display>> {
     let mut displays = Display::all()?;
-    if crate::platform::is_installed()
-        && no_displays(&displays)
-        && virtual_display_manager::is_virtual_display_supported()
-    {
+
+    // Do not add virtual display if the platform is not installed or the virtual display is not supported.
+    if !crate::platform::is_installed() || !virtual_display_manager::is_virtual_display_supported() {
+        return Ok(displays);
+    }
+
+    // Enable headless virtual display when
+    // 1. `amyuni` idd is not used.
+    // 2. `amyuni` idd is used and `add_amyuni_headless` is true.
+    if virtual_display_manager::is_amyuni_idd() && !add_amyuni_headless {
+        return Ok(displays);
+    }
+
+    // If is switching session, no displays may be detected. But it is not a real case.
+    if displays.is_empty() && crate::platform::desktop_changed() {
+        return Ok(displays);
+    }
+
+    let no_displays_v = no_displays(&displays);
+    virtual_display_manager::set_can_plug_out_all(!no_displays_v);
+    if no_displays_v {
         log::debug!("no displays, create virtual display");
         if let Err(e) = virtual_display_manager::plug_in_headless() {
             log::error!("plug in headless failed {}", e);

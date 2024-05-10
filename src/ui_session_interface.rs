@@ -2,6 +2,7 @@ use crate::{
     common::{get_supported_keyboard_modes, is_keyboard_mode_supported},
     input::{MOUSE_BUTTON_LEFT, MOUSE_TYPE_DOWN, MOUSE_TYPE_UP, MOUSE_TYPE_WHEEL},
 };
+use async_trait::async_trait;
 use bytes::Bytes;
 use rdev::{Event, EventType::*, KeyCode};
 use std::{
@@ -191,6 +192,11 @@ impl<T: InvokeUiSession> Session<T> {
         self.lc.read().unwrap().conn_type.eq(&ConnType::RDP)
     }
 
+    #[cfg(feature = "flutter")]
+    pub fn is_multi_ui_session(&self) -> bool {
+        self.ui_handler.is_multi_ui_session()
+    }
+
     pub fn get_view_style(&self) -> String {
         self.lc.read().unwrap().view_style.clone()
     }
@@ -227,10 +233,12 @@ impl<T: InvokeUiSession> Session<T> {
         }
     }
 
+    // Caution: This function must be called after peer info is received.
     pub fn get_keyboard_mode(&self) -> String {
         let mode = self.lc.read().unwrap().keyboard_mode.clone();
         let keyboard_mode = KeyboardMode::from_str(&mode);
 
+        // Note: peer_version is 0 before peer info is received.
         let peer_version = self.get_peer_version();
         let platform = self.peer_platform();
 
@@ -437,8 +445,13 @@ impl<T: InvokeUiSession> Session<T> {
 
     pub fn alternative_codecs(&self) -> (bool, bool, bool, bool) {
         let luid = self.lc.read().unwrap().adapter_luid;
-        let decoder =
-            scrap::codec::Decoder::supported_decodings(None, cfg!(feature = "flutter"), luid);
+        let mark_unsupported = self.lc.read().unwrap().mark_unsupported.clone();
+        let decoder = scrap::codec::Decoder::supported_decodings(
+            None,
+            cfg!(feature = "flutter"),
+            luid,
+            &mark_unsupported,
+        );
         let mut vp8 = decoder.ability_vp8 > 0;
         let mut av1 = decoder.ability_av1 > 0;
         let mut h264 = decoder.ability_h264 > 0;
@@ -718,6 +731,11 @@ impl<T: InvokeUiSession> Session<T> {
         let mut msg_out = Message::new();
         msg_out.set_misc(misc);
         self.send(Data::Message(msg_out));
+
+        #[cfg(not(feature = "flutter"))]
+        {
+            self.capture_displays(vec![], vec![], vec![display]);
+        }
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1013,6 +1031,7 @@ impl<T: InvokeUiSession> Session<T> {
         if true == force_relay {
             self.lc.write().unwrap().force_relay = true;
         }
+        self.lc.write().unwrap().peer_info = None;
         let mut lock = self.thread.lock().unwrap();
         // No need to join the previous thread, because it will exit automatically.
         // And the previous thread will not change important states.
@@ -1080,6 +1099,15 @@ impl<T: InvokeUiSession> Session<T> {
         remember: bool,
     ) {
         self.send(Data::Login((os_username, os_password, password, remember)));
+    }
+
+    pub fn send2fa(&self, code: String) {
+        let mut msg_out = Message::new();
+        msg_out.set_auth_2fa(Auth2FA {
+            code,
+            ..Default::default()
+        });
+        self.send(Data::Message(msg_out));
     }
 
     pub fn new_rdp(&self) {
@@ -1201,23 +1229,32 @@ impl<T: InvokeUiSession> Session<T> {
     pub fn change_resolution(&self, display: i32, width: i32, height: i32) {
         *self.last_change_display.lock().unwrap() =
             ChangeDisplayRecord::new(display, width, height);
-        self.do_change_resolution(width, height);
+        self.do_change_resolution(display, width, height);
     }
 
     #[inline]
     fn try_change_init_resolution(&self, display: i32) {
         if let Some((w, h)) = self.lc.read().unwrap().get_custom_resolution(display) {
-            self.do_change_resolution(w, h);
+            self.change_resolution(display, w, h);
         }
     }
 
-    fn do_change_resolution(&self, width: i32, height: i32) {
+    fn do_change_resolution(&self, display: i32, width: i32, height: i32) {
         let mut misc = Misc::new();
-        misc.set_change_resolution(Resolution {
+        let resolution = Resolution {
             width,
             height,
             ..Default::default()
-        });
+        };
+        if crate::common::is_support_multi_ui_session_num(self.lc.read().unwrap().version) {
+            misc.set_change_display_resolution(DisplayResolution {
+                display,
+                resolution: Some(resolution).into(),
+                ..Default::default()
+            });
+        } else {
+            misc.set_change_resolution(resolution);
+        }
         let mut msg = Message::new();
         msg.set_misc(misc);
         self.send(Data::Message(msg));
@@ -1231,6 +1268,62 @@ impl<T: InvokeUiSession> Session<T> {
     #[inline]
     pub fn close_voice_call(&self) {
         self.send(Data::CloseVoiceCall);
+    }
+
+    pub fn send_selected_session_id(&self, sid: String) {
+        if let Ok(sid) = sid.parse::<u32>() {
+            self.lc.write().unwrap().selected_windows_session_id = Some(sid);
+            let mut misc = Misc::new();
+            misc.set_selected_sid(sid);
+            let mut msg = Message::new();
+            msg.set_misc(misc);
+            self.send(Data::Message(msg));
+            let pi = self.lc.read().unwrap().peer_info.clone();
+            if let Some(pi) = pi {
+                if pi.windows_sessions.current_sid == sid {
+                    if self.is_file_transfer() {
+                        if pi.username.is_empty() {
+                            self.on_error(
+                                "No active console user logged on, please connect and logon first.",
+                            );
+                        } else {
+                            #[cfg(not(feature = "flutter"))]
+                            {
+                                let remote_dir = self.get_option("remote_dir".to_string());
+                                let show_hidden =
+                                    !self.get_option("remote_show_hidden".to_string()).is_empty();
+                                self.read_remote_dir(remote_dir, show_hidden);
+                            }
+                        }
+                    } else {
+                        self.msgbox(
+                            "success",
+                            "Successful",
+                            "Connected, waiting for image...",
+                            "",
+                        );
+                    }
+                }
+            }
+        } else {
+            log::error!("selected invalid sid: {}", sid);
+        }
+    }
+
+    #[inline]
+    pub fn request_init_msgs(&self, display: usize) {
+        self.send_message_query(display);
+    }
+
+    fn send_message_query(&self, display: usize) {
+        let mut misc = Misc::new();
+        misc.set_message_query(MessageQuery {
+            switch_display: display as _,
+            ..Default::default()
+        });
+        let mut msg = Message::new();
+        msg.set_misc(misc);
+        self.send(Data::Message(msg));
     }
 }
 
@@ -1289,8 +1382,12 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn on_voice_call_incoming(&self);
     fn get_rgba(&self, display: usize) -> *const u8;
     fn next_rgba(&self, display: usize);
-    #[cfg(all(feature = "gpucodec", feature = "flutter"))]
+    #[cfg(all(feature = "vram", feature = "flutter"))]
     fn on_texture(&self, display: usize, texture: *mut c_void);
+    fn set_multiple_windows_session(&self, sessions: Vec<WindowsSession>);
+    fn set_current_display(&self, disp_idx: i32);
+    #[cfg(feature = "flutter")]
+    fn is_multi_ui_session(&self) -> bool;
 }
 
 impl<T: InvokeUiSession> Deref for Session<T> {
@@ -1309,6 +1406,7 @@ impl<T: InvokeUiSession> DerefMut for Session<T> {
 
 impl<T: InvokeUiSession> FileManager for Session<T> {}
 
+#[async_trait]
 impl<T: InvokeUiSession> Interface for Session<T> {
     fn get_lch(&self) -> Arc<RwLock<LoginConfigHandler>> {
         return self.lc.clone();
@@ -1332,9 +1430,13 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         handle_login_error(self.lc.clone(), err, self)
     }
 
+    fn set_multiple_windows_session(&self, sessions: Vec<WindowsSession>) {
+        self.ui_handler.set_multiple_windows_session(sessions);
+    }
+
     fn handle_peer_info(&self, mut pi: PeerInfo) {
         log::debug!("handle_peer_info :{:?}", pi);
-        pi.username = self.lc.read().unwrap().get_username(&pi);
+        self.lc.write().unwrap().peer_info = Some(pi.clone());
         if pi.current_display as usize >= pi.displays.len() {
             pi.current_display = 0;
         }
@@ -1342,7 +1444,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             self.set_permission("restart", false);
         }
         if self.is_file_transfer() {
-            if pi.username.is_empty() {
+            if pi.username.is_empty() && pi.windows_sessions.sessions.is_empty() {
                 self.on_error("No active console user logged on, please connect and logon first.");
                 return;
             }
@@ -1390,6 +1492,19 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             std::fs::File::create(&path).ok();
             if let Some(path) = path.to_str() {
                 crate::platform::windows::add_recent_document(&path);
+            }
+        }
+        if !pi.windows_sessions.sessions.is_empty() {
+            let selected = self
+                .lc
+                .read()
+                .unwrap()
+                .selected_windows_session_id
+                .to_owned();
+            if selected == Some(pi.windows_sessions.current_sid) {
+                self.send_selected_session_id(pi.windows_sessions.current_sid.to_string());
+            } else {
+                self.set_multiple_windows_session(pi.windows_sessions.sessions.clone());
             }
         }
     }
@@ -1583,7 +1698,7 @@ pub async fn io_loop<T: InvokeUiSession>(handler: Session<T>, round: u32) {
                 if pixelbuffer {
                     ui_handler.on_rgba(display, data);
                 } else {
-                    #[cfg(all(feature = "gpucodec", feature = "flutter"))]
+                    #[cfg(all(feature = "vram", feature = "flutter"))]
                     ui_handler.on_texture(display, _texture);
                 }
             },

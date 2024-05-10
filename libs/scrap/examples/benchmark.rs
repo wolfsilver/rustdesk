@@ -239,28 +239,25 @@ fn test_av1(
 
 #[cfg(feature = "hwcodec")]
 mod hw {
-    use hwcodec::ffmpeg::CodecInfo;
-    use scrap::hwcodec::{HwDecoder, HwEncoder, HwEncoderConfig};
+    use hwcodec::ffmpeg_ram::CodecInfo;
+    use scrap::{
+        hwcodec::{HwRamDecoder, HwRamEncoder, HwRamEncoderConfig},
+        CodecFormat,
+    };
 
     use super::*;
 
     pub fn test(c: &mut Capturer, width: usize, height: usize, quality: Q, yuv_count: usize) {
-        let best = HwEncoder::best();
         let mut h264s = Vec::new();
         let mut h265s = Vec::new();
-        if let Some(info) = best.h264 {
+        if let Some(info) = HwRamEncoder::try_get(CodecFormat::H264) {
             test_encoder(width, height, quality, info, c, yuv_count, &mut h264s);
         }
-        if let Some(info) = best.h265 {
+        if let Some(info) = HwRamEncoder::try_get(CodecFormat::H265) {
             test_encoder(width, height, quality, info, c, yuv_count, &mut h265s);
         }
-        let best = HwDecoder::best();
-        if let Some(info) = best.h264 {
-            test_decoder(info, &h264s);
-        }
-        if let Some(info) = best.h265 {
-            test_decoder(info, &h265s);
-        }
+        test_decoder(CodecFormat::H264, &h264s);
+        test_decoder(CodecFormat::H265, &h265s);
     }
 
     fn test_encoder(
@@ -272,8 +269,8 @@ mod hw {
         yuv_count: usize,
         h26xs: &mut Vec<Vec<u8>>,
     ) {
-        let mut encoder = HwEncoder::new(
-            EncoderCfg::HW(HwEncoderConfig {
+        let mut encoder = HwRamEncoder::new(
+            EncoderCfg::HWRAM(HwRamEncoderConfig {
                 name: info.name.clone(),
                 width,
                 height,
@@ -322,16 +319,21 @@ mod hw {
         );
     }
 
-    fn test_decoder(info: CodecInfo, h26xs: &Vec<Vec<u8>>) {
-        let mut decoder = HwDecoder::new(info.clone()).unwrap();
+    fn test_decoder(format: CodecFormat, h26xs: &Vec<Vec<u8>>) {
+        let mut decoder = HwRamDecoder::new(format).unwrap();
         let start = Instant::now();
         let mut cnt = 0;
         for h26x in h26xs {
             let _ = decoder.decode(h26x).unwrap();
             cnt += 1;
         }
-        let device = format!("{:?}", info.hwdevice).to_lowercase();
+        let device = format!("{:?}", decoder.info.hwdevice).to_lowercase();
         let device = device.split("_").last().unwrap();
-        println!("{} {}: {:?}", info.name, device, start.elapsed() / cnt);
+        println!(
+            "{} {}: {:?}",
+            decoder.info.name,
+            device,
+            start.elapsed() / cnt
+        );
     }
 }

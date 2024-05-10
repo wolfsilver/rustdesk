@@ -1,9 +1,9 @@
 import 'dart:convert';
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
@@ -112,10 +112,10 @@ class _ToolbarTheme {
   static const double iconRadius = 8;
   static const double elevation = 3;
 
-  static double dividerSpaceToAction = Platform.isWindows ? 8 : 14;
+  static double dividerSpaceToAction = isWindows ? 8 : 14;
 
-  static double menuBorderRadius = Platform.isWindows ? 5.0 : 7.0;
-  static EdgeInsets menuPadding = Platform.isWindows
+  static double menuBorderRadius = isWindows ? 5.0 : 7.0;
+  static EdgeInsets menuPadding = isWindows
       ? EdgeInsets.fromLTRB(4, 12, 4, 12)
       : EdgeInsets.fromLTRB(6, 14, 6, 14);
   static const double menuButtonBorderRadius = 3.0;
@@ -492,7 +492,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       toolbarItems.add(_ChatMenu(id: widget.id, ffi: widget.ffi));
       toolbarItems.add(_VoiceCallMenu(id: widget.id, ffi: widget.ffi));
     }
-    toolbarItems.add(_RecordMenu());
+    if (!isWeb) toolbarItems.add(_RecordMenu());
     toolbarItems.add(_CloseMenu(id: widget.id, ffi: widget.ffi));
     final toolbarBorderRadius = BorderRadius.all(Radius.circular(4.0));
     return Column(
@@ -637,7 +637,7 @@ class _MonitorMenu extends StatelessWidget {
         menuStyle: MenuStyle(
             padding:
                 MaterialStatePropertyAll(EdgeInsets.symmetric(horizontal: 6))),
-        menuChildren: [buildMonitorSubmenuWidget()]);
+        menuChildrenGetter: () => [buildMonitorSubmenuWidget()]);
   }
 
   Widget buildMultiMonitorMenu() {
@@ -759,15 +759,18 @@ class _MonitorMenu extends StatelessWidget {
       final children = <Widget>[];
       for (var i = 0; i < pi.displays.length; i++) {
         final d = pi.displays[i];
-        final fontSize = (d.width * scale < d.height * scale
-                ? d.width * scale
-                : d.height * scale) *
+        double s = d.scale;
+        int dWidth = d.width.toDouble() ~/ s;
+        int dHeight = d.height.toDouble() ~/ s;
+        final fontSize = (dWidth * scale < dHeight * scale
+                ? dWidth * scale
+                : dHeight * scale) *
             0.65;
         children.add(Positioned(
           left: (d.x - rect.left) * scale + startX,
           top: (d.y - rect.top) * scale + startY,
-          width: d.width * scale,
-          height: d.height * scale,
+          width: dWidth * scale,
+          height: dHeight * scale,
           child: Container(
             decoration: BoxDecoration(
               border: Border.all(
@@ -841,17 +844,17 @@ class _ControlMenu extends StatelessWidget {
         color: _ToolbarTheme.blueColor,
         hoverColor: _ToolbarTheme.hoverBlueColor,
         ffi: ffi,
-        menuChildren: toolbarControls(context, id, ffi).map((e) {
-          if (e.divider) {
-            return Divider();
-          } else {
-            return MenuButton(
-                child: e.child,
-                onPressed: e.onPressed,
-                ffi: ffi,
-                trailingIcon: e.trailingIcon);
-          }
-        }).toList());
+        menuChildrenGetter: () => toolbarControls(context, id, ffi).map((e) {
+              if (e.divider) {
+                return Divider();
+              } else {
+                return MenuButton(
+                    child: e.child,
+                    onPressed: e.onPressed,
+                    ffi: ffi,
+                    trailingIcon: e.trailingIcon);
+              }
+            }).toList());
   }
 }
 
@@ -938,13 +941,12 @@ class ScreenAdjustor {
   }
 
   updateScreen() async {
-    final v = await rustDeskWinManager.call(
-        WindowType.Main, kWindowGetWindowInfo, '');
-    final String valueStr = v.result;
-    if (valueStr.isEmpty) {
+    final String info =
+        isWeb ? screenInfo : await _getScreenInfoDesktop() ?? '';
+    if (info.isEmpty) {
       _screen = null;
     } else {
-      final screenMap = jsonDecode(valueStr);
+      final screenMap = jsonDecode(info);
       _screen = window_size.Screen(
           Rect.fromLTRB(screenMap['frame']['l'], screenMap['frame']['t'],
               screenMap['frame']['r'], screenMap['frame']['b']),
@@ -957,15 +959,23 @@ class ScreenAdjustor {
     }
   }
 
+  _getScreenInfoDesktop() async {
+    final v = await rustDeskWinManager.call(
+        WindowType.Main, kWindowGetWindowInfo, '');
+    return v.result;
+  }
+
   Future<bool> isWindowCanBeAdjusted() async {
     final viewStyle =
         await bind.sessionGetViewStyle(sessionId: ffi.sessionId) ?? '';
     if (viewStyle != kRemoteViewStyleOriginal) {
       return false;
     }
-    final remoteCount = RemoteCountState.find().value;
-    if (remoteCount != 1) {
-      return false;
+    if (!isWeb) {
+      final remoteCount = RemoteCountState.find().value;
+      if (remoteCount != 1) {
+        return false;
+      }
     }
     if (_screen == null) {
       return false;
@@ -1036,53 +1046,63 @@ class _DisplayMenuState extends State<_DisplayMenu> {
   @override
   Widget build(BuildContext context) {
     _screenAdjustor.updateScreen();
-
-    final menuChildren = <Widget>[
-      _screenAdjustor.adjustWindow(context),
-      viewStyle(),
-      scrollStyle(),
-      imageQuality(),
-      codec(),
-      _ResolutionsMenu(
-        id: widget.id,
-        ffi: widget.ffi,
-        screenAdjustor: _screenAdjustor,
-      ),
-      _VirtualDisplayMenu(
-        id: widget.id,
-        ffi: widget.ffi,
-      ),
-      Divider(),
-      toggles(),
-    ];
-    // privacy mode
-    if (ffiModel.keyboard && pi.features.privacyMode) {
-      final privacyModeState = PrivacyModeState.find(id);
-      final privacyModeList =
-          toolbarPrivacyMode(privacyModeState, context, id, ffi);
-      if (privacyModeList.length == 1) {
-        menuChildren.add(CkbMenuButton(
-            value: privacyModeList[0].value,
-            onChanged: privacyModeList[0].onChanged,
-            child: privacyModeList[0].child,
-            ffi: ffi));
-      } else if (privacyModeList.length > 1) {
-        menuChildren.addAll([
-          Divider(),
-          _SubmenuButton(
-              ffi: widget.ffi,
-              child: Text(translate('Privacy mode')),
-              menuChildren: privacyModeList
-                  .map((e) => CkbMenuButton(
-                      value: e.value,
-                      onChanged: e.onChanged,
-                      child: e.child,
-                      ffi: ffi))
-                  .toList()),
-        ]);
+    menuChildrenGetter() {
+      final menuChildren = <Widget>[
+        _screenAdjustor.adjustWindow(context),
+        viewStyle(),
+        scrollStyle(),
+        imageQuality(),
+        codec(),
+        _ResolutionsMenu(
+          id: widget.id,
+          ffi: widget.ffi,
+          screenAdjustor: _screenAdjustor,
+        ),
+        if (pi.isRustDeskIdd)
+          _RustDeskVirtualDisplayMenu(
+            id: widget.id,
+            ffi: widget.ffi,
+          ),
+        if (pi.isAmyuniIdd)
+          _AmyuniVirtualDisplayMenu(
+            id: widget.id,
+            ffi: widget.ffi,
+          ),
+        Divider(),
+        cursorToggles(),
+        Divider(),
+        toggles(),
+      ];
+      // privacy mode
+      if (ffiModel.keyboard && pi.features.privacyMode) {
+        final privacyModeState = PrivacyModeState.find(id);
+        final privacyModeList =
+            toolbarPrivacyMode(privacyModeState, context, id, ffi);
+        if (privacyModeList.length == 1) {
+          menuChildren.add(CkbMenuButton(
+              value: privacyModeList[0].value,
+              onChanged: privacyModeList[0].onChanged,
+              child: privacyModeList[0].child,
+              ffi: ffi));
+        } else if (privacyModeList.length > 1) {
+          menuChildren.addAll([
+            Divider(),
+            _SubmenuButton(
+                ffi: widget.ffi,
+                child: Text(translate('Privacy mode')),
+                menuChildren: privacyModeList
+                    .map((e) => CkbMenuButton(
+                        value: e.value,
+                        onChanged: e.onChanged,
+                        child: e.child,
+                        ffi: ffi))
+                    .toList()),
+          ]);
+        }
       }
+      menuChildren.add(widget.pluginItem);
+      return menuChildren;
     }
-    menuChildren.add(widget.pluginItem);
 
     return _IconSubmenuButton(
       tooltip: 'Display Settings',
@@ -1090,7 +1110,7 @@ class _DisplayMenuState extends State<_DisplayMenu> {
       ffi: widget.ffi,
       color: _ToolbarTheme.blueColor,
       hoverColor: _ToolbarTheme.hoverBlueColor,
-      menuChildren: menuChildren,
+      menuChildrenGetter: menuChildrenGetter,
     );
   }
 
@@ -1194,6 +1214,23 @@ class _DisplayMenuState extends State<_DisplayMenu> {
         });
   }
 
+  cursorToggles() {
+    return futureBuilder(
+        future: toolbarCursor(context, id, ffi),
+        hasData: (data) {
+          final v = data as List<TToggleMenu>;
+          if (v.isEmpty) return Offstage();
+          return Column(
+              children: v
+                  .map((e) => CkbMenuButton(
+                      value: e.value,
+                      onChanged: e.onChanged,
+                      child: e.child,
+                      ffi: ffi))
+                  .toList());
+        });
+  }
+
   toggles() {
     return futureBuilder(
         future: toolbarDisplayToggle(context, id, ffi),
@@ -1243,7 +1280,7 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
   FFI get ffi => widget.ffi;
   PeerInfo get pi => widget.ffi.ffiModel.pi;
   FfiModel get ffiModel => widget.ffi.ffiModel;
-  Rect? get rect => ffiModel.rect;
+  Rect? get rect => scaledRect();
   List<Resolution> get resolutions => pi.resolutions;
   bool get isWayland => bind.mainCurrentIsWayland();
 
@@ -1251,6 +1288,20 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
   void initState() {
     super.initState();
     _getLocalResolutionWayland();
+  }
+
+  Rect? scaledRect() {
+    final scale = pi.scaleOfDisplay(pi.currentDisplay);
+    final rect = ffiModel.rect;
+    if (rect == null) {
+      return null;
+    }
+    return Rect.fromLTWH(
+      rect.left,
+      rect.top,
+      rect.width / scale,
+      rect.height / scale,
+    );
   }
 
   @override
@@ -1286,7 +1337,8 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
     if (lastGroupValue == _kCustomResolutionValue) {
       _groupValue = _kCustomResolutionValue;
     } else {
-      _groupValue = '${rect?.width.toInt()}x${rect?.height.toInt()}';
+      _groupValue =
+          '${(rect?.width ?? 0).toInt()}x${(rect?.height ?? 0).toInt()}';
     }
   }
 
@@ -1320,6 +1372,14 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
         final display = json.decode(mainDisplay);
         if (display['w'] != null && display['h'] != null) {
           _localResolution = Resolution(display['w'], display['h']);
+          if (isWeb) {
+            if (display['scaleFactor'] != null) {
+              _localResolution = Resolution(
+                (display['w'] / display['scaleFactor']).toInt(),
+                (display['h'] / display['scaleFactor']).toInt(),
+              );
+            }
+          }
         }
       } catch (e) {
         debugPrint('Failed to decode $mainDisplay, $e');
@@ -1327,7 +1387,8 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
     }
   }
 
-  _onChanged(BuildContext context, String? value) async {
+  // This widget has been unmounted, so the State no longer has a context
+  _onChanged(String? value) async {
     if (pi.currentDisplay == kAllDisplayValue) {
       return;
     }
@@ -1350,12 +1411,12 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
 
     if (w != null && h != null) {
       if (w != rect?.width.toInt() || h != rect?.height.toInt()) {
-        await _changeResolution(context, w, h);
+        await _changeResolution(w, h);
       }
     }
   }
 
-  _changeResolution(BuildContext context, int w, int h) async {
+  _changeResolution(int w, int h) async {
     if (pi.currentDisplay == kAllDisplayValue) {
       return;
     }
@@ -1384,11 +1445,16 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
     if (display == null) {
       return Offstage();
     }
+    if (!resolutions.any((e) =>
+        e.width == display.originalWidth &&
+        e.height == display.originalHeight)) {
+      return Offstage();
+    }
     return Offstage(
       offstage: !showOriginalBtn,
       child: MenuButton(
-        onPressed: () => _changeResolution(
-            context, display.originalWidth, display.originalHeight),
+        onPressed: () =>
+            _changeResolution(display.originalWidth, display.originalHeight),
         ffi: widget.ffi,
         child: Text(
             '${translate('resolution_original_tip')} ${display.originalWidth}x${display.originalHeight}'),
@@ -1404,7 +1470,7 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
         onPressed: () {
           final resolution = _getBestFitResolution();
           if (resolution != null) {
-            _changeResolution(context, resolution.width, resolution.height);
+            _changeResolution(resolution.width, resolution.height);
           }
         },
         ffi: widget.ffi,
@@ -1420,7 +1486,7 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
       child: RdoMenuButton(
         value: _kCustomResolutionValue,
         groupValue: _groupValue,
-        onChanged: (String? value) => _onChanged(context, value),
+        onChanged: (String? value) => _onChanged(value),
         ffi: widget.ffi,
         child: Row(
           children: [
@@ -1461,7 +1527,7 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
       .map((e) => RdoMenuButton(
           value: '${e.width}x${e.height}',
           groupValue: _groupValue,
-          onChanged: (String? value) => _onChanged(context, value),
+          onChanged: (String? value) => _onChanged(value),
           ffi: widget.ffi,
           child: Text('${e.width}x${e.height}')))
       .toList();
@@ -1498,21 +1564,23 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
   }
 }
 
-class _VirtualDisplayMenu extends StatefulWidget {
+class _RustDeskVirtualDisplayMenu extends StatefulWidget {
   final String id;
   final FFI ffi;
 
-  _VirtualDisplayMenu({
+  _RustDeskVirtualDisplayMenu({
     Key? key,
     required this.id,
     required this.ffi,
   }) : super(key: key);
 
   @override
-  State<_VirtualDisplayMenu> createState() => _VirtualDisplayMenuState();
+  State<_RustDeskVirtualDisplayMenu> createState() =>
+      _RustDeskVirtualDisplayMenuState();
 }
 
-class _VirtualDisplayMenuState extends State<_VirtualDisplayMenu> {
+class _RustDeskVirtualDisplayMenuState
+    extends State<_RustDeskVirtualDisplayMenu> {
   @override
   void initState() {
     super.initState();
@@ -1527,7 +1595,7 @@ class _VirtualDisplayMenuState extends State<_VirtualDisplayMenu> {
       return Offstage();
     }
 
-    final virtualDisplays = widget.ffi.ffiModel.pi.virtualDisplays;
+    final virtualDisplays = widget.ffi.ffiModel.pi.RustDeskVirtualDisplays;
     final privacyModeState = PrivacyModeState.find(widget.id);
 
     final children = <Widget>[];
@@ -1569,6 +1637,82 @@ class _VirtualDisplayMenuState extends State<_VirtualDisplayMenu> {
   }
 }
 
+class _AmyuniVirtualDisplayMenu extends StatefulWidget {
+  final String id;
+  final FFI ffi;
+
+  _AmyuniVirtualDisplayMenu({
+    Key? key,
+    required this.id,
+    required this.ffi,
+  }) : super(key: key);
+
+  @override
+  State<_AmyuniVirtualDisplayMenu> createState() =>
+      _AmiyuniVirtualDisplayMenuState();
+}
+
+class _AmiyuniVirtualDisplayMenuState extends State<_AmyuniVirtualDisplayMenu> {
+  @override
+  void initState() {
+    super.initState();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.ffi.ffiModel.pi.platform != kPeerPlatformWindows) {
+      return Offstage();
+    }
+    if (!widget.ffi.ffiModel.pi.isInstalled) {
+      return Offstage();
+    }
+
+    final count = widget.ffi.ffiModel.pi.amyuniVirtualDisplayCount;
+    final privacyModeState = PrivacyModeState.find(widget.id);
+
+    final children = <Widget>[
+      Obx(() => Row(
+            children: [
+              TextButton(
+                onPressed: privacyModeState.isNotEmpty || count == 0
+                    ? null
+                    : () => bind.sessionToggleVirtualDisplay(
+                        sessionId: widget.ffi.sessionId, index: 0, on: false),
+                child: Icon(Icons.remove),
+              ),
+              Text(count.toString()),
+              TextButton(
+                onPressed: privacyModeState.isNotEmpty || count == 4
+                    ? null
+                    : () => bind.sessionToggleVirtualDisplay(
+                        sessionId: widget.ffi.sessionId, index: 0, on: true),
+                child: Icon(Icons.add),
+              ),
+            ],
+          )),
+      Divider(),
+      Obx(() => MenuButton(
+            onPressed: privacyModeState.isNotEmpty || count == 0
+                ? null
+                : () {
+                    bind.sessionToggleVirtualDisplay(
+                        sessionId: widget.ffi.sessionId,
+                        index: kAllVirtualDisplay,
+                        on: false);
+                  },
+            ffi: widget.ffi,
+            child: Text(translate('Plug out all')),
+          )),
+    ];
+
+    return _SubmenuButton(
+      ffi: widget.ffi,
+      menuChildren: children,
+      child: Text(translate("Virtual display")),
+    );
+  }
+}
+
 class _KeyboardMenu extends StatelessWidget {
   final String id;
   final FFI ffi;
@@ -1584,19 +1728,7 @@ class _KeyboardMenu extends StatelessWidget {
   Widget build(BuildContext context) {
     var ffiModel = Provider.of<FfiModel>(context);
     if (!ffiModel.keyboard) return Offstage();
-    // If use flutter to grab keys, we can only use one mode.
-    // Map mode and Legacy mode, at least one of them is supported.
-    String? modeOnly;
-    if (isInputSourceFlutter) {
-      if (bind.sessionIsKeyboardModeSupported(
-          sessionId: ffi.sessionId, mode: kKeyMapMode)) {
-        modeOnly = kKeyMapMode;
-      } else if (bind.sessionIsKeyboardModeSupported(
-          sessionId: ffi.sessionId, mode: kKeyLegacyMode)) {
-        modeOnly = kKeyLegacyMode;
-      }
-    }
-    final toolbarToggles = toolbarKeyboardToggles(ffi)
+    toolbarToggles() => toolbarKeyboardToggles(ffi)
         .map((e) => CkbMenuButton(
             value: e.value, onChanged: e.onChanged, child: e.child, ffi: ffi))
         .toList();
@@ -1606,18 +1738,18 @@ class _KeyboardMenu extends StatelessWidget {
         ffi: ffi,
         color: _ToolbarTheme.blueColor,
         hoverColor: _ToolbarTheme.hoverBlueColor,
-        menuChildren: [
-          keyboardMode(modeOnly),
-          localKeyboardType(),
-          inputSource(),
-          Divider(),
-          viewMode(),
-          Divider(),
-          ...toolbarToggles,
-        ]);
+        menuChildrenGetter: () => [
+              keyboardMode(),
+              localKeyboardType(),
+              inputSource(),
+              Divider(),
+              viewMode(),
+              Divider(),
+              ...toolbarToggles(),
+            ]);
   }
 
-  keyboardMode(String? modeOnly) {
+  keyboardMode() {
     return futureBuilder(future: () async {
       return await bind.sessionGetKeyboardMode(sessionId: ffi.sessionId) ??
           kKeyLegacyMode;
@@ -1635,6 +1767,19 @@ class _KeyboardMenu extends StatelessWidget {
         await bind.sessionSetKeyboardMode(
             sessionId: ffi.sessionId, value: value);
         await ffi.inputModel.updateKeyboardMode();
+      }
+
+      // If use flutter to grab keys, we can only use one mode.
+      // Map mode and Legacy mode, at least one of them is supported.
+      String? modeOnly;
+      if (isInputSourceFlutter) {
+        if (bind.sessionIsKeyboardModeSupported(
+            sessionId: ffi.sessionId, mode: kKeyMapMode)) {
+          modeOnly = kKeyMapMode;
+        } else if (bind.sessionIsKeyboardModeSupported(
+            sessionId: ffi.sessionId, mode: kKeyLegacyMode)) {
+          modeOnly = kKeyLegacyMode;
+        }
       }
 
       for (InputModeMenu mode in modes) {
@@ -1730,7 +1875,7 @@ class _KeyboardMenu extends StatelessWidget {
             ? (value) async {
                 if (value == null) return;
                 await bind.sessionToggleOption(
-                    sessionId: ffi.sessionId, value: 'view-only');
+                    sessionId: ffi.sessionId, value: kOptionViewOnly);
                 ffiModel.setViewOnly(id, value);
               }
             : null,
@@ -1765,7 +1910,7 @@ class _ChatMenuState extends State<_ChatMenu> {
         ffi: widget.ffi,
         color: _ToolbarTheme.blueColor,
         hoverColor: _ToolbarTheme.hoverBlueColor,
-        menuChildren: [textChat(), voiceCall()]);
+        menuChildrenGetter: () => [textChat(), voiceCall()]);
   }
 
   textChat() {
@@ -1809,34 +1954,71 @@ class _VoiceCallMenu extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    menuChildrenGetter() {
+      final audioInput =
+          AudioInput(builder: (devices, currentDevice, setDevice) {
+        return Column(
+          children: devices
+              .map((d) => RdoMenuButton<String>(
+                    child: Container(
+                      child: Text(
+                        d,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      constraints: BoxConstraints(maxWidth: 250),
+                    ),
+                    value: d,
+                    groupValue: currentDevice,
+                    onChanged: (v) {
+                      if (v != null) setDevice(v);
+                    },
+                    ffi: ffi,
+                  ))
+              .toList(),
+        );
+      });
+      return [
+        audioInput,
+        Divider(),
+        MenuButton(
+          child: Text(translate('End call')),
+          onPressed: () => bind.sessionCloseVoiceCall(sessionId: ffi.sessionId),
+          ffi: ffi,
+        ),
+      ];
+    }
+
     return Obx(
       () {
-        final String tooltip;
-        final String icon;
         switch (ffi.chatModel.voiceCallStatus.value) {
           case VoiceCallStatus.waitingForResponse:
-            tooltip = "Waiting";
-            icon = "assets/call_wait.svg";
-            break;
+            return buildCallWaiting(context);
           case VoiceCallStatus.connected:
-            tooltip = "Disconnect";
-            icon = "assets/call_end.svg";
-            break;
+            return _IconSubmenuButton(
+              tooltip: 'Voice call',
+              svg: 'assets/voice_call.svg',
+              color: _ToolbarTheme.blueColor,
+              hoverColor: _ToolbarTheme.hoverBlueColor,
+              menuChildrenGetter: menuChildrenGetter,
+              ffi: ffi,
+            );
           default:
             return Offstage();
         }
-        return _IconMenuButton(
-            assetName: icon,
-            tooltip: tooltip,
-            onPressed: () =>
-                bind.sessionCloseVoiceCall(sessionId: ffi.sessionId),
-            color: _ToolbarTheme.redColor,
-            hoverColor: _ToolbarTheme.hoverRedColor);
       },
     );
   }
-}
 
+  Widget buildCallWaiting(BuildContext context) {
+    return _IconMenuButton(
+      assetName: "assets/call_wait.svg",
+      tooltip: "Waiting",
+      onPressed: () => bind.sessionCloseVoiceCall(sessionId: ffi.sessionId),
+      color: _ToolbarTheme.redColor,
+      hoverColor: _ToolbarTheme.hoverRedColor,
+    );
+  }
+}
 class _RecordMenu extends StatelessWidget {
   const _RecordMenu({Key? key}) : super(key: key);
 
@@ -1969,9 +2151,9 @@ class _IconSubmenuButton extends StatefulWidget {
   final Widget? icon;
   final Color color;
   final Color hoverColor;
-  final List<Widget> menuChildren;
+  final List<Widget> Function() menuChildrenGetter;
   final MenuStyle? menuStyle;
-  final FFI ffi;
+  final FFI? ffi;
   final double? width;
 
   _IconSubmenuButton({
@@ -1981,8 +2163,8 @@ class _IconSubmenuButton extends StatefulWidget {
     required this.tooltip,
     required this.color,
     required this.hoverColor,
-    required this.menuChildren,
-    required this.ffi,
+    required this.menuChildrenGetter,
+    this.ffi,
     this.menuStyle,
     this.width,
   }) : super(key: key);
@@ -2025,7 +2207,8 @@ class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
                           color: hover ? widget.hoverColor : widget.color,
                         ),
                         child: icon))),
-            menuChildren: widget.menuChildren
+            menuChildren: widget
+                .menuChildrenGetter()
                 .map((e) => _buildPointerTrackWidget(e, widget.ffi))
                 .toList()));
     return MenuBar(children: [
@@ -2063,13 +2246,13 @@ class MenuButton extends StatelessWidget {
   final VoidCallback? onPressed;
   final Widget? trailingIcon;
   final Widget? child;
-  final FFI ffi;
+  final FFI? ffi;
   MenuButton(
       {Key? key,
       this.onPressed,
       this.trailingIcon,
       required this.child,
-      required this.ffi})
+      this.ffi})
       : super(key: key);
 
   @override
@@ -2078,7 +2261,9 @@ class MenuButton extends StatelessWidget {
         key: key,
         onPressed: onPressed != null
             ? () {
-                _menuDismissCallback(ffi);
+                if (ffi != null) {
+                  _menuDismissCallback(ffi!);
+                }
                 onPressed?.call();
               }
             : null,
@@ -2091,13 +2276,13 @@ class CkbMenuButton extends StatelessWidget {
   final bool? value;
   final ValueChanged<bool?>? onChanged;
   final Widget? child;
-  final FFI ffi;
+  final FFI? ffi;
   const CkbMenuButton(
       {Key? key,
       required this.value,
       required this.onChanged,
       required this.child,
-      required this.ffi})
+      this.ffi})
       : super(key: key);
 
   @override
@@ -2108,7 +2293,9 @@ class CkbMenuButton extends StatelessWidget {
       child: child,
       onChanged: onChanged != null
           ? (bool? value) {
-              _menuDismissCallback(ffi);
+              if (ffi != null) {
+                _menuDismissCallback(ffi!);
+              }
               onChanged?.call(value);
             }
           : null,
@@ -2121,13 +2308,13 @@ class RdoMenuButton<T> extends StatelessWidget {
   final T? groupValue;
   final ValueChanged<T?>? onChanged;
   final Widget? child;
-  final FFI ffi;
+  final FFI? ffi;
   const RdoMenuButton({
     Key? key,
     required this.value,
     required this.groupValue,
     required this.child,
-    required this.ffi,
+    this.ffi,
     this.onChanged,
   }) : super(key: key);
 
@@ -2139,7 +2326,9 @@ class RdoMenuButton<T> extends StatelessWidget {
       child: child,
       onChanged: onChanged != null
           ? (T? value) {
-              _menuDismissCallback(ffi);
+              if (ffi != null) {
+                _menuDismissCallback(ffi!);
+              }
               onChanged?.call(value);
             }
           : null,
@@ -2326,10 +2515,11 @@ class InputModeMenu {
 
 _menuDismissCallback(FFI ffi) => ffi.inputModel.refreshMousePos();
 
-Widget _buildPointerTrackWidget(Widget child, FFI ffi) {
+Widget _buildPointerTrackWidget(Widget child, FFI? ffi) {
   return Listener(
-    onPointerHover: (PointerHoverEvent e) =>
-        ffi.inputModel.lastMousePos = e.position,
+    onPointerHover: (PointerHoverEvent e) => {
+      if (ffi != null) {ffi.inputModel.lastMousePos = e.position}
+    },
     child: MouseRegion(
       child: child,
     ),
