@@ -1,6 +1,7 @@
 use crate::{
     common::{get_supported_keyboard_modes, is_keyboard_mode_supported},
     input::{MOUSE_BUTTON_LEFT, MOUSE_TYPE_DOWN, MOUSE_TYPE_UP, MOUSE_TYPE_WHEEL},
+    ui_interface::use_texture_render,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -312,7 +313,7 @@ impl<T: InvokeUiSession> Session<T> {
     pub fn toggle_option(&self, name: String) {
         let msg = self.lc.write().unwrap().toggle_option(name.clone());
         #[cfg(not(feature = "flutter"))]
-        if name == "enable-file-transfer" {
+        if name == hbb_common::config::keys::OPTION_ENABLE_FILE_COPY_PASTE {
             self.send(Data::ToggleClipboardFile);
         }
         if let Some(msg) = msg {
@@ -409,9 +410,12 @@ impl<T: InvokeUiSession> Session<T> {
             self.send(Data::Message(msg));
         }
         if value != "custom" {
-            // non custom quality use 30 fps
-            let msg = self.lc.write().unwrap().set_custom_fps(30, false);
-            self.send(Data::Message(msg));
+            let last_auto_fps = self.lc.read().unwrap().last_auto_fps;
+            if last_auto_fps.unwrap_or(usize::MAX) >= 30 {
+                // non custom quality use 30 fps
+                let msg = self.lc.write().unwrap().set_custom_fps(30, false);
+                self.send(Data::Message(msg));
+            }
         }
     }
 
@@ -448,7 +452,7 @@ impl<T: InvokeUiSession> Session<T> {
         let mark_unsupported = self.lc.read().unwrap().mark_unsupported.clone();
         let decoder = scrap::codec::Decoder::supported_decodings(
             None,
-            cfg!(feature = "flutter"),
+            use_texture_render(),
             luid,
             &mark_unsupported,
         );
@@ -467,6 +471,12 @@ impl<T: InvokeUiSession> Session<T> {
     pub fn change_prefer_codec(&self) {
         let msg = self.lc.write().unwrap().update_supported_decodings();
         self.send(Data::Message(msg));
+    }
+
+    pub fn use_texture_render_changed(&self) {
+        self.send(Data::ResetDecoder(None));
+        self.change_prefer_codec();
+        self.send(Data::Message(LoginConfigHandler::refresh()));
     }
 
     pub fn restart_remote_device(&self) {
@@ -732,8 +742,7 @@ impl<T: InvokeUiSession> Session<T> {
         msg_out.set_misc(misc);
         self.send(Data::Message(msg_out));
 
-        #[cfg(not(feature = "flutter"))]
-        {
+        if !use_texture_render() {
             self.capture_displays(vec![], vec![], vec![display]);
         }
     }
@@ -770,7 +779,6 @@ impl<T: InvokeUiSession> Session<T> {
         }
     }
 
-    // flutter only TODO new input
     pub fn input_string(&self, value: &str) {
         let mut key_event = KeyEvent::new();
         key_event.set_seq(value.to_owned());
@@ -795,7 +803,54 @@ impl<T: InvokeUiSession> Session<T> {
     pub fn handle_flutter_key_event(
         &self,
         keyboard_mode: &str,
-        _name: &str,
+        name: &str,
+        platform_code: i32,
+        position_code: i32,
+        lock_modes: i32,
+        down_or_up: bool,
+    ) {
+        if name == "flutter_key" {
+            self._handle_key_flutter_simulation(keyboard_mode, platform_code, down_or_up);
+        } else {
+            self._handle_key_non_flutter_simulation(
+                keyboard_mode,
+                platform_code,
+                position_code,
+                lock_modes,
+                down_or_up,
+            );
+        }
+    }
+
+    #[cfg(not(any(target_os = "ios")))]
+    fn _handle_key_flutter_simulation(
+        &self,
+        _keyboard_mode: &str,
+        platform_code: i32,
+        down_or_up: bool,
+    ) {
+        // https://github.com/flutter/flutter/blob/master/packages/flutter/lib/src/services/keyboard_key.g.dart#L4356
+        let ctrl_key = match platform_code {
+            0x0007007f => Some(ControlKey::VolumeMute),
+            0x00070080 => Some(ControlKey::VolumeUp),
+            0x00070081 => Some(ControlKey::VolumeDown),
+            0x00070066 => Some(ControlKey::Power),
+            _ => None,
+        };
+        let Some(ctrl_key) = ctrl_key else { return };
+        let mut key_event = KeyEvent {
+            mode: KeyboardMode::Translate.into(),
+            down: down_or_up,
+            ..Default::default()
+        };
+        key_event.set_control_key(ctrl_key);
+        self.send_key_event(&key_event);
+    }
+
+    #[cfg(not(any(target_os = "ios")))]
+    fn _handle_key_non_flutter_simulation(
+        &self,
+        keyboard_mode: &str,
         platform_code: i32,
         position_code: i32,
         lock_modes: i32,
@@ -962,7 +1017,7 @@ impl<T: InvokeUiSession> Session<T> {
             }
         }
 
-        let (x, y) = if mask == MOUSE_TYPE_WHEEL {
+        let (x, y) = if mask == MOUSE_TYPE_WHEEL || mask == MOUSE_TYPE_TRACKPAD {
             self.get_scroll_xy((x, y))
         } else {
             (x, y)
@@ -1262,6 +1317,8 @@ impl<T: InvokeUiSession> Session<T> {
 
     #[inline]
     pub fn request_voice_call(&self) {
+        #[cfg(target_os = "linux")]
+        std::thread::spawn(crate::ipc::start_pa);
         self.send(Data::NewVoiceCall);
     }
 
@@ -1684,7 +1741,7 @@ pub async fn io_loop<T: InvokeUiSession>(handler: Session<T>, round: u32) {
     let frame_count_map: Arc<RwLock<HashMap<usize, usize>>> = Default::default();
     let frame_count_map_cl = frame_count_map.clone();
     let ui_handler = handler.ui_handler.clone();
-    let (video_sender, audio_sender, video_queue_map, decode_fps_map, chroma) =
+    let (video_sender, audio_sender, video_queue_map, decode_fps, chroma) =
         start_video_audio_threads(
             handler.clone(),
             move |display: usize,
@@ -1712,7 +1769,7 @@ pub async fn io_loop<T: InvokeUiSession>(handler: Session<T>, round: u32) {
         receiver,
         sender,
         frame_count_map,
-        decode_fps_map,
+        decode_fps,
         chroma,
     );
     remote.io_loop(&key, &token, round).await;

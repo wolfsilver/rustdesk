@@ -59,14 +59,12 @@ class RustdeskImpl {
   }
 
   String sessionAddExistedSync(
-      {required String id, required UuidValue sessionId, dynamic hint}) {
+      {required String id,
+      required UuidValue sessionId,
+      required Int32List displays,
+      dynamic hint}) {
     return '';
   }
-
-  void sessionTryAddDisplay(
-      {required UuidValue sessionId,
-      required Int32List displays,
-      dynamic hint}) {}
 
   String sessionAddSync(
       {required UuidValue sessionId,
@@ -92,6 +90,14 @@ class RustdeskImpl {
       jsonEncode({'id': id})
     ]);
     return Stream.empty();
+  }
+
+  Stream<EventToUI> sessionStartWithDisplays(
+      {required UuidValue sessionId,
+      required String id,
+      required Int32List displays,
+      dynamic hint}) {
+    throw UnimplementedError();
   }
 
   Future<bool?> sessionGetRemember(
@@ -201,12 +207,6 @@ class RustdeskImpl {
           'option:flutter:peer',
           jsonEncode({'name': k, 'value': v})
         ]));
-  }
-
-  Future<String?> sessionGetFlutterOptionByPeerId(
-      {required String id, required String k, dynamic hint}) {
-    return Future(
-        () => js.context.callMethod('getByName', ['option:flutter:peer', k]));
   }
 
   int getNextTextureKey({dynamic hint}) {
@@ -943,7 +943,7 @@ class RustdeskImpl {
     throw UnimplementedError();
   }
 
-  Future<String> mainVideoSaveDirectory({required bool root, dynamic hint}) {
+  String mainVideoSaveDirectory({required bool root, dynamic hint}) {
     throw UnimplementedError();
   }
 
@@ -1412,16 +1412,8 @@ class RustdeskImpl {
     return false;
   }
 
-  Future<void> mainStartPa({dynamic hint}) {
-    throw UnimplementedError();
-  }
-
   bool mainHideDocker({dynamic hint}) {
     throw UnimplementedError();
-  }
-
-  bool mainHasPixelbufferTextureRender({dynamic hint}) {
-    return false;
   }
 
   bool mainHasFileClipboard({dynamic hint}) {
@@ -1467,6 +1459,10 @@ class RustdeskImpl {
   }
 
   bool isDisableAb({dynamic hint}) {
+    return false;
+  }
+
+  bool isDisableGroupPanel({dynamic hint}) {
     return false;
   }
 
@@ -1607,6 +1603,30 @@ class RustdeskImpl {
 
   Future<String> mainHandleWaylandScreencastRestoreToken(
       {required String key, required String value, dynamic hint}) {
+    throw UnimplementedError();
+  }
+
+  bool mainIsOptionFixed({required String key, dynamic hint}) {
+    throw UnimplementedError();
+  }
+
+  bool mainGetUseTextureRender({dynamic hint}) {
+    throw UnimplementedError();
+  }
+
+  bool mainHasValidBotSync({dynamic hint}) {
+    throw UnimplementedError();
+  }
+
+  Future<String> mainVerifyBot({required String token, dynamic hint}) {
+    throw UnimplementedError();
+  }
+
+  String mainGetUnlockPin({dynamic hint}) {
+    throw UnimplementedError();
+  }
+
+  String mainSetUnlockPin({required String pin, dynamic hint}) {
     throw UnimplementedError();
   }
 

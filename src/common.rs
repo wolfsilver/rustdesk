@@ -1,5 +1,5 @@
 use std::{
-    borrow::Cow,
+    collections::HashMap,
     future::Future,
     sync::{Arc, Mutex, RwLock},
     task::Poll,
@@ -7,128 +7,13 @@ use std::{
 
 use serde_json::Value;
 
-#[derive(Debug, Eq, PartialEq)]
-pub enum GrabState {
-    Ready,
-    Run,
-    Wait,
-    Exit,
-}
-
-#[cfg(all(target_os = "linux", feature = "unix-file-copy-paste"))]
-static X11_CLIPBOARD: once_cell::sync::OnceCell<x11_clipboard::Clipboard> =
-    once_cell::sync::OnceCell::new();
-
-#[cfg(all(target_os = "linux", feature = "unix-file-copy-paste"))]
-fn get_clipboard() -> Result<&'static x11_clipboard::Clipboard, String> {
-    X11_CLIPBOARD
-        .get_or_try_init(|| x11_clipboard::Clipboard::new())
-        .map_err(|e| e.to_string())
-}
-
-#[cfg(all(target_os = "linux", feature = "unix-file-copy-paste"))]
-pub struct ClipboardContext {
-    string_setter: x11rb::protocol::xproto::Atom,
-    string_getter: x11rb::protocol::xproto::Atom,
-    text_uri_list: x11rb::protocol::xproto::Atom,
-
-    clip: x11rb::protocol::xproto::Atom,
-    prop: x11rb::protocol::xproto::Atom,
-}
-
-#[cfg(all(target_os = "linux", feature = "unix-file-copy-paste"))]
-fn parse_plain_uri_list(v: Vec<u8>) -> Result<String, String> {
-    let text = String::from_utf8(v).map_err(|_| "ConversionFailure".to_owned())?;
-    let mut list = String::new();
-    for line in text.lines() {
-        if !line.starts_with("file://") {
-            continue;
-        }
-        let decoded = percent_encoding::percent_decode_str(line)
-            .decode_utf8()
-            .map_err(|_| "ConversionFailure".to_owned())?;
-        list = list + "\n" + decoded.trim_start_matches("file://");
-    }
-    list = list.trim().to_owned();
-    Ok(list)
-}
-
-#[cfg(all(target_os = "linux", feature = "unix-file-copy-paste"))]
-impl ClipboardContext {
-    pub fn new() -> Result<Self, String> {
-        let clipboard = get_clipboard()?;
-        let string_getter = clipboard
-            .getter
-            .get_atom("UTF8_STRING")
-            .map_err(|e| e.to_string())?;
-        let string_setter = clipboard
-            .setter
-            .get_atom("UTF8_STRING")
-            .map_err(|e| e.to_string())?;
-        let text_uri_list = clipboard
-            .getter
-            .get_atom("text/uri-list")
-            .map_err(|e| e.to_string())?;
-        let prop = clipboard.getter.atoms.property;
-        let clip = clipboard.getter.atoms.clipboard;
-        Ok(Self {
-            text_uri_list,
-            string_setter,
-            string_getter,
-            clip,
-            prop,
-        })
-    }
-
-    pub fn get_text(&mut self) -> Result<String, String> {
-        let clip = self.clip;
-        let prop = self.prop;
-
-        const TIMEOUT: std::time::Duration = std::time::Duration::from_millis(120);
-
-        let text_content = get_clipboard()?
-            .load(clip, self.string_getter, prop, TIMEOUT)
-            .map_err(|e| e.to_string())?;
-
-        let file_urls = get_clipboard()?.load(clip, self.text_uri_list, prop, TIMEOUT);
-
-        if file_urls.is_err() || file_urls.as_ref().unwrap().is_empty() {
-            log::trace!("clipboard get text, no file urls");
-            return String::from_utf8(text_content).map_err(|e| e.to_string());
-        }
-
-        let file_urls = parse_plain_uri_list(file_urls.unwrap())?;
-
-        let text_content = String::from_utf8(text_content).map_err(|e| e.to_string())?;
-
-        if text_content.trim() == file_urls.trim() {
-            log::trace!("clipboard got text but polluted");
-            return Err(String::from("polluted text"));
-        }
-
-        Ok(text_content)
-    }
-
-    pub fn set_text(&mut self, content: String) -> Result<(), String> {
-        let clip = self.clip;
-
-        let value = content.clone().into_bytes();
-        get_clipboard()?
-            .store(clip, self.string_setter, value)
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-use hbb_common::compress::decompress;
 use hbb_common::{
     allow_err,
     anyhow::{anyhow, Context},
     bail, base64,
     bytes::Bytes,
-    compress::compress as compress_func,
-    config::{self, Config, CONNECT_TIMEOUT, READ_TIMEOUT},
+    config::{self, Config, CONNECT_TIMEOUT, READ_TIMEOUT, RENDEZVOUS_PORT},
+    futures::future::join_all,
     futures_util::future::poll_fn,
     get_version_number, log,
     message_proto::*,
@@ -144,25 +29,21 @@ use hbb_common::{
     },
     ResultType,
 };
-// #[cfg(any(target_os = "android", target_os = "ios", feature = "cli"))]
-use hbb_common::{config::RENDEZVOUS_PORT, futures::future::join_all};
 
 use crate::{
     hbbs_http::create_http_client_async,
     ui_interface::{get_option, set_option},
 };
 
+#[derive(Debug, Eq, PartialEq)]
+pub enum GrabState {
+    Ready,
+    Run,
+    Wait,
+    Exit,
+}
+
 pub type NotifyMessageBox = fn(String, String, String, String) -> dyn Future<Output = ()>;
-
-pub const CLIPBOARD_NAME: &'static str = "clipboard";
-pub const CLIPBOARD_INTERVAL: u64 = 333;
-
-#[cfg(all(target_os = "macos", feature = "flutter_texture_render"))]
-// https://developer.apple.com/forums/thread/712709
-// Memory alignment should be multiple of 64.
-pub const DST_STRIDE_RGBA: usize = 64;
-#[cfg(not(all(target_os = "macos", feature = "flutter_texture_render")))]
-pub const DST_STRIDE_RGBA: usize = 1;
 
 // the executable name of the portable version
 pub const PORTABLE_APPNAME_RUNTIME_ENV_KEY: &str = "RUSTDESK_APPNAME";
@@ -171,6 +52,9 @@ pub const PLATFORM_WINDOWS: &str = "Windows";
 pub const PLATFORM_LINUX: &str = "Linux";
 pub const PLATFORM_MACOS: &str = "Mac OS";
 pub const PLATFORM_ANDROID: &str = "Android";
+
+pub const TIMER_OUT: Duration = Duration::from_secs(1);
+pub const DEFAULT_KEEP_ALIVE: i32 = 60_000;
 
 const MIN_VER_MULTI_UI_SESSION: &str = "1.2.4";
 
@@ -189,11 +73,7 @@ pub mod input {
 }
 
 lazy_static::lazy_static! {
-    pub static ref CONTENT: Arc<Mutex<String>> = Default::default();
     pub static ref SOFTWARE_UPDATE_URL: Arc<Mutex<String>> = Default::default();
-}
-
-lazy_static::lazy_static! {
     pub static ref DEVICE_ID: Arc<Mutex<String>> = Default::default();
     pub static ref DEVICE_NAME: Arc<Mutex<String>> = Default::default();
 }
@@ -203,11 +83,7 @@ lazy_static::lazy_static! {
     static ref IS_SERVER: bool = std::env::args().nth(1) == Some("--server".to_owned());
     // Is server logic running. The server code can invoked to run by the main process if --server is not running.
     static ref SERVER_RUNNING: Arc<RwLock<bool>> = Default::default();
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-lazy_static::lazy_static! {
-    static ref ARBOARD_MTX: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+    static ref IS_MAIN: bool = std::env::args().nth(1).map_or(true, |arg| !arg.starts_with("--"));
 }
 
 pub struct SimpleCallOnReturn {
@@ -256,6 +132,11 @@ pub fn is_server() -> bool {
     *IS_SERVER
 }
 
+#[inline]
+pub fn is_main() -> bool {
+    *IS_MAIN
+}
+
 // Is server logic running.
 #[inline]
 pub fn is_server_running() -> bool {
@@ -271,48 +152,6 @@ pub fn valid_for_numlock(evt: &KeyEvent) -> bool {
     } else {
         false
     }
-}
-
-pub fn create_clipboard_msg(content: String) -> Message {
-    let bytes = content.into_bytes();
-    let compressed = compress_func(&bytes);
-    let compress = compressed.len() < bytes.len();
-    let content = if compress { compressed } else { bytes };
-    let mut msg = Message::new();
-    msg.set_clipboard(Clipboard {
-        compress,
-        content: content.into(),
-        ..Default::default()
-    });
-    msg
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn check_clipboard(
-    ctx: &mut Option<ClipboardContext>,
-    old: Option<&Arc<Mutex<String>>>,
-) -> Option<Message> {
-    if ctx.is_none() {
-        *ctx = ClipboardContext::new().ok();
-    }
-    let ctx2 = ctx.as_mut()?;
-    let side = if old.is_none() { "host" } else { "client" };
-    let old = if let Some(old) = old { old } else { &CONTENT };
-    let content = {
-        let _lock = ARBOARD_MTX.lock().unwrap();
-        ctx2.get_text()
-    };
-    if let Ok(content) = content {
-        if content.len() < 2_000_000 && !content.is_empty() {
-            let changed = content != *old.lock().unwrap();
-            if changed {
-                log::info!("{} update found on {}", CLIPBOARD_NAME, side);
-                *old.lock().unwrap() = content.clone();
-                return Some(create_clipboard_msg(content));
-            }
-        }
-    }
-    None
 }
 
 /// Set sound input device.
@@ -361,34 +200,6 @@ pub fn get_default_sound_input() -> Option<String> {
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub fn get_default_sound_input() -> Option<String> {
     None
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn update_clipboard(clipboard: Clipboard, old: Option<&Arc<Mutex<String>>>) {
-    let content = if clipboard.compress {
-        decompress(&clipboard.content)
-    } else {
-        clipboard.content.into()
-    };
-    if let Ok(content) = String::from_utf8(content) {
-        if content.is_empty() {
-            // ctx.set_text may crash if content is empty
-            return;
-        }
-        match ClipboardContext::new() {
-            Ok(mut ctx) => {
-                let side = if old.is_none() { "host" } else { "client" };
-                let old = if let Some(old) = old { old } else { &CONTENT };
-                *old.lock().unwrap() = content.clone();
-                let _lock = ARBOARD_MTX.lock().unwrap();
-                allow_err!(ctx.set_text(content));
-                log::debug!("{} updated on {}", CLIPBOARD_NAME, side);
-            }
-            Err(err) => {
-                log::error!("Failed to create clipboard context: {}", err);
-            }
-        }
-    }
 }
 
 #[cfg(feature = "use_rubato")]
@@ -853,7 +664,32 @@ pub fn run_me<T: AsRef<std::ffi::OsStr>>(args: Vec<T>) -> std::io::Result<std::p
         }
     }
     let cmd = std::env::current_exe()?;
-    return std::process::Command::new(cmd).args(&args).spawn();
+    let mut cmd = std::process::Command::new(cmd);
+    #[cfg(windows)]
+    let mut force_foreground = false;
+    #[cfg(windows)]
+    {
+        let arg_strs = args
+            .iter()
+            .map(|x| x.as_ref().to_string_lossy())
+            .collect::<Vec<_>>();
+        if arg_strs == vec!["--install"] || arg_strs == &["--noinstall"] {
+            cmd.env(crate::platform::SET_FOREGROUND_WINDOW, "1");
+            force_foreground = true;
+        }
+    }
+    let result = cmd.args(&args).spawn();
+    match result.as_ref() {
+        Ok(_child) =>
+        {
+            #[cfg(windows)]
+            if force_foreground {
+                unsafe { winapi::um::winuser::AllowSetForegroundWindow(_child.id() as u32) };
+            }
+        }
+        Err(err) => log::error!("run_me: {err:?}"),
+    }
+    result
 }
 
 #[inline]
@@ -1434,7 +1270,7 @@ pub fn using_public_server() -> bool {
 
 pub struct ThrottledInterval {
     interval: Interval,
-    last_tick: Instant,
+    next_tick: Instant,
     min_interval: Duration,
 }
 
@@ -1443,7 +1279,7 @@ impl ThrottledInterval {
         let period = i.period();
         ThrottledInterval {
             interval: i,
-            last_tick: Instant::now() - period * 2,
+            next_tick: Instant::now(),
             min_interval: Duration::from_secs_f64(period.as_secs_f64() * 0.9),
         }
     }
@@ -1456,8 +1292,9 @@ impl ThrottledInterval {
     pub fn poll_tick(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Instant> {
         match self.interval.poll_tick(cx) {
             Poll::Ready(instant) => {
-                if self.last_tick.elapsed() >= self.min_interval {
-                    self.last_tick = Instant::now();
+                let now = Instant::now();
+                if self.next_tick <= now {
+                    self.next_tick = now + self.min_interval;
                     Poll::Ready(instant)
                 } else {
                     // This call is required since tokio 1.27
@@ -1475,78 +1312,6 @@ pub type RustDeskInterval = ThrottledInterval;
 #[inline]
 pub fn rustdesk_interval(i: Interval) -> ThrottledInterval {
     ThrottledInterval::new(i)
-}
-
-#[cfg(not(any(
-    target_os = "android",
-    target_os = "ios",
-    all(target_os = "linux", feature = "unix-file-copy-paste")
-)))]
-pub struct ClipboardContext(arboard::Clipboard);
-
-#[cfg(not(any(
-    target_os = "android",
-    target_os = "ios",
-    all(target_os = "linux", feature = "unix-file-copy-paste")
-)))]
-impl ClipboardContext {
-    #[inline]
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    pub fn new() -> ResultType<ClipboardContext> {
-        Ok(ClipboardContext(arboard::Clipboard::new()?))
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn new() -> ResultType<ClipboardContext> {
-        let dur = arboard::Clipboard::get_x11_server_conn_timeout();
-        let dur_bak = dur;
-        let _restore_timeout_on_ret = SimpleCallOnReturn {
-            b: true,
-            f: Box::new(move || arboard::Clipboard::set_x11_server_conn_timeout(dur_bak)),
-        };
-
-        for i in 1..4 {
-            arboard::Clipboard::set_x11_server_conn_timeout(dur * i);
-            match arboard::Clipboard::new() {
-                Ok(c) => return Ok(ClipboardContext(c)),
-                Err(arboard::Error::X11ServerConnTimeout) => continue,
-                Err(err) => return Err(err.into()),
-            }
-        }
-        bail!("Failed to create clipboard context, timeout");
-    }
-
-    #[inline]
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    pub fn get_text(&mut self) -> ResultType<String> {
-        Ok(self.0.get_text()?)
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn get_text(&mut self) -> ResultType<String> {
-        let dur = arboard::Clipboard::get_x11_server_conn_timeout();
-        let dur_bak = dur;
-        let _restore_timeout_on_ret = SimpleCallOnReturn {
-            b: true,
-            f: Box::new(move || arboard::Clipboard::set_x11_server_conn_timeout(dur_bak)),
-        };
-
-        for i in 1..4 {
-            arboard::Clipboard::set_x11_server_conn_timeout(dur * i);
-            match self.0.get_text() {
-                Ok(s) => return Ok(s),
-                Err(arboard::Error::X11ServerConnTimeout) => continue,
-                Err(err) => return Err(err.into()),
-            }
-        }
-        bail!("Failed to get text, timeout");
-    }
-
-    #[inline]
-    pub fn set_text<'a, T: Into<Cow<'a, str>>>(&mut self, text: T) -> ResultType<()> {
-        self.0.set_text(text)?;
-        Ok(())
-    }
 }
 
 pub fn load_custom_client() {
@@ -1569,6 +1334,82 @@ pub fn load_custom_client() {
         };
         read_custom_client(&data.trim());
     }
+}
+
+fn read_custom_client_advanced_settings(
+    settings: serde_json::Value,
+    map_display_settings: &HashMap<String, &&str>,
+    map_local_settings: &HashMap<String, &&str>,
+    map_settings: &HashMap<String, &&str>,
+    map_buildin_settings: &HashMap<String, &&str>,
+    is_override: bool,
+) {
+    let mut display_settings = if is_override {
+        config::OVERWRITE_DISPLAY_SETTINGS.write().unwrap()
+    } else {
+        config::DEFAULT_DISPLAY_SETTINGS.write().unwrap()
+    };
+    let mut local_settings = if is_override {
+        config::OVERWRITE_LOCAL_SETTINGS.write().unwrap()
+    } else {
+        config::DEFAULT_LOCAL_SETTINGS.write().unwrap()
+    };
+    let mut server_settings = if is_override {
+        config::OVERWRITE_SETTINGS.write().unwrap()
+    } else {
+        config::DEFAULT_SETTINGS.write().unwrap()
+    };
+    let mut buildin_settings = config::BUILTIN_SETTINGS.write().unwrap();
+
+    if let Some(settings) = settings.as_object() {
+        for (k, v) in settings {
+            let Some(v) = v.as_str() else {
+                continue;
+            };
+            if let Some(k2) = map_display_settings.get(k) {
+                display_settings.insert(k2.to_string(), v.to_owned());
+            } else if let Some(k2) = map_local_settings.get(k) {
+                local_settings.insert(k2.to_string(), v.to_owned());
+            } else if let Some(k2) = map_settings.get(k) {
+                server_settings.insert(k2.to_string(), v.to_owned());
+            } else if let Some(k2) = map_buildin_settings.get(k) {
+                buildin_settings.insert(k2.to_string(), v.to_owned());
+            } else {
+                let k2 = k.replace("_", "-");
+                let k = k2.replace("-", "_");
+                // display
+                display_settings.insert(k.clone(), v.to_owned());
+                display_settings.insert(k2.clone(), v.to_owned());
+                // local
+                local_settings.insert(k.clone(), v.to_owned());
+                local_settings.insert(k2.clone(), v.to_owned());
+                // server
+                server_settings.insert(k.clone(), v.to_owned());
+                server_settings.insert(k2.clone(), v.to_owned());
+                // buildin
+                buildin_settings.insert(k.clone(), v.to_owned());
+                buildin_settings.insert(k2.clone(), v.to_owned());
+            }
+        }
+    }
+}
+
+#[inline]
+#[cfg(target_os = "macos")]
+pub fn get_dst_align_rgba() -> usize {
+    // https://developer.apple.com/forums/thread/712709
+    // Memory alignment should be multiple of 64.
+    if crate::ui_interface::use_texture_render() {
+        64
+    } else {
+        1
+    }
+}
+
+#[inline]
+#[cfg(not(target_os = "macos"))]
+pub fn get_dst_align_rgba() -> usize {
+    1
 }
 
 pub fn read_custom_client(config: &str) {
@@ -1597,55 +1438,42 @@ pub fn read_custom_client(config: &str) {
             *config::APP_NAME.write().unwrap() = app_name.to_owned();
         }
     }
+
+    let mut map_display_settings = HashMap::new();
+    for s in config::keys::KEYS_DISPLAY_SETTINGS {
+        map_display_settings.insert(s.replace("_", "-"), s);
+    }
+    let mut map_local_settings = HashMap::new();
+    for s in config::keys::KEYS_LOCAL_SETTINGS {
+        map_local_settings.insert(s.replace("_", "-"), s);
+    }
+    let mut map_settings = HashMap::new();
+    for s in config::keys::KEYS_SETTINGS {
+        map_settings.insert(s.replace("_", "-"), s);
+    }
+    let mut buildin_settings = HashMap::new();
+    for s in config::keys::KEYS_BUILDIN_SETTINGS {
+        buildin_settings.insert(s.replace("_", "-"), s);
+    }
     if let Some(default_settings) = data.remove("default-settings") {
-        if let Some(default_settings) = default_settings.as_object() {
-            for (k, v) in default_settings {
-                let Some(v) = v.as_str() else {
-                    continue;
-                };
-                if k.starts_with("$$") {
-                    config::DEFAULT_DISPLAY_SETTINGS
-                        .write()
-                        .unwrap()
-                        .insert(k.clone(), v[2..].to_owned());
-                } else if k.starts_with("$") {
-                    config::DEFAULT_LOCAL_SETTINGS
-                        .write()
-                        .unwrap()
-                        .insert(k.clone(), v[1..].to_owned());
-                } else {
-                    config::DEFAULT_SETTINGS
-                        .write()
-                        .unwrap()
-                        .insert(k.clone(), v.to_owned());
-                }
-            }
-        }
+        read_custom_client_advanced_settings(
+            default_settings,
+            &map_display_settings,
+            &map_local_settings,
+            &map_settings,
+            &buildin_settings,
+            false,
+        );
     }
     if let Some(overwrite_settings) = data.remove("override-settings") {
-        if let Some(overwrite_settings) = overwrite_settings.as_object() {
-            for (k, v) in overwrite_settings {
-                let Some(v) = v.as_str() else {
-                    continue;
-                };
-                if k.starts_with("$$") {
-                    config::OVERWRITE_DISPLAY_SETTINGS
-                        .write()
-                        .unwrap()
-                        .insert(k.clone(), v[2..].to_owned());
-                } else if k.starts_with("$") {
-                    config::OVERWRITE_LOCAL_SETTINGS
-                        .write()
-                        .unwrap()
-                        .insert(k.clone(), v[1..].to_owned());
-                } else {
-                    config::OVERWRITE_SETTINGS
-                        .write()
-                        .unwrap()
-                        .insert(k.clone(), v.to_owned());
-                }
-            }
-        }
+        read_custom_client_advanced_settings(
+            overwrite_settings,
+            &map_display_settings,
+            &map_local_settings,
+            &map_settings,
+            &buildin_settings,
+            true,
+        );
     }
     for (k, v) in data {
         if let Some(v) = v.as_str() {
@@ -1655,6 +1483,15 @@ pub fn read_custom_client(config: &str) {
                 .insert(k, v.to_owned());
         };
     }
+}
+
+#[inline]
+pub fn is_empty_uni_link(arg: &str) -> bool {
+    let prefix = crate::get_uri_prefix();
+    if !arg.starts_with(&prefix) {
+        return false;
+    }
+    arg[prefix.len()..].chars().all(|c| c == '/')
 }
 
 #[cfg(test)]
@@ -1796,30 +1633,5 @@ mod tests {
             Duration::from_secs_f64(dur.as_secs_f64() * 0.499 * 1e-9),
             Duration::from_nanos(0)
         );
-    }
-
-    #[tokio::test]
-    #[cfg(not(any(
-        target_os = "android",
-        target_os = "ios",
-        all(target_os = "linux", feature = "unix-file-copy-paste")
-    )))]
-    async fn test_clipboard_context() {
-        #[cfg(target_os = "linux")]
-        let dur = {
-            let dur = Duration::from_micros(500);
-            arboard::Clipboard::set_x11_server_conn_timeout(dur);
-            dur
-        };
-
-        let _ctx = ClipboardContext::new();
-        #[cfg(target_os = "linux")]
-        {
-            assert_eq!(
-                arboard::Clipboard::get_x11_server_conn_timeout(),
-                dur,
-                "Failed to restore x11 server conn timeout"
-            );
-        }
     }
 }

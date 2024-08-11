@@ -38,18 +38,16 @@ class PopupMenuChildrenItem<T> extends mod_menu.PopupMenuEntry<T> {
 
   @override
   MyPopupMenuItemState<T, PopupMenuChildrenItem<T>> createState() =>
-      MyPopupMenuItemState<T, PopupMenuChildrenItem<T>>();
+      MyPopupMenuItemState<T, PopupMenuChildrenItem<T>>(enabled?.value);
 }
 
 class MyPopupMenuItemState<T, W extends PopupMenuChildrenItem<T>>
     extends State<W> {
   RxBool enabled = true.obs;
 
-  @override
-  void initState() {
-    super.initState();
-    if (widget.enabled != null) {
-      enabled.value = widget.enabled!.value;
+  MyPopupMenuItemState(bool? e) {
+    if (e != null) {
+      enabled.value = e;
     }
   }
 
@@ -65,7 +63,7 @@ class MyPopupMenuItemState<T, W extends PopupMenuChildrenItem<T>>
     final PopupMenuThemeData popupMenuTheme = PopupMenuTheme.of(context);
     TextStyle style = widget.textStyle ??
         popupMenuTheme.textStyle ??
-        theme.textTheme.subtitle1!;
+        theme.textTheme.titleMedium!;
     return Obx(() => mod_menu.PopupMenuButton<T>(
           enabled: enabled.value,
           position: widget.position,
@@ -445,8 +443,17 @@ abstract class MenuEntrySwitchBase<T> extends MenuEntryBase<T> {
           dismissCallback: dismissCallback,
         );
 
+  bool get isEnabled => enabled?.value ?? true;
+
   RxBool get curOption;
   Future<void> setOption(bool? option);
+
+  tryPop(BuildContext context) {
+    if (dismissOnClicked && Navigator.canPop(context)) {
+      Navigator.pop(context);
+      super.dismissCallback?.call();
+    }
+  }
 
   @override
   List<mod_menu.PopupMenuEntry<T>> build(
@@ -481,44 +488,33 @@ abstract class MenuEntrySwitchBase<T> extends MenuEntryBase<T> {
                             if (switchType == SwitchType.sswitch) {
                               return Switch(
                                 value: curOption.value,
-                                onChanged: (v) {
-                                  if (super.dismissOnClicked &&
-                                      Navigator.canPop(context)) {
-                                    Navigator.pop(context);
-                                    if (super.dismissCallback != null) {
-                                      super.dismissCallback!();
-                                    }
-                                  }
-                                  setOption(v);
-                                },
+                                onChanged: isEnabled
+                                    ? (v) {
+                                        tryPop(context);
+                                        setOption(v);
+                                      }
+                                    : null,
                               );
                             } else {
                               return Checkbox(
                                 value: curOption.value,
-                                onChanged: (v) {
-                                  if (super.dismissOnClicked &&
-                                      Navigator.canPop(context)) {
-                                    Navigator.pop(context);
-                                    if (super.dismissCallback != null) {
-                                      super.dismissCallback!();
-                                    }
-                                  }
-                                  setOption(v);
-                                },
+                                onChanged: isEnabled
+                                    ? (v) {
+                                        tryPop(context);
+                                        setOption(v);
+                                      }
+                                    : null,
                               );
                             }
                           })),
                     ))
                   ])),
-              onPressed: () {
-                if (super.dismissOnClicked && Navigator.canPop(context)) {
-                  Navigator.pop(context);
-                  if (super.dismissCallback != null) {
-                    super.dismissCallback!();
-                  }
-                }
-                setOption(!curOption.value);
-              },
+              onPressed: isEnabled
+                  ? () {
+                      tryPop(context);
+                      setOption(!curOption.value);
+                    }
+                  : null,
             )),
       )
     ];

@@ -335,7 +335,7 @@ packages:
     description:
       path: "."
       ref: HEAD
-      resolved-ref: ef03db52a20a7899da135d694c071fa3866c8fb1
+      resolved-ref: "0d4606f95b3926566aeacab16c6db1cb9ce3d3fa"
       url: "https://github.com/rustdesk-org/rustdesk_desktop_multi_window"
     source: git
     version: "0.1.0"
@@ -377,7 +377,7 @@ packages:
       path: "."
       ref: "24cb88413fa5181d949ddacbb30a65d5c459e7d9"
       resolved-ref: "24cb88413fa5181d949ddacbb30a65d5c459e7d9"
-      url: "https://github.com/21pages/dynamic_layouts.git"
+      url: "https://github.com/rustdesk-org/dynamic_layouts.git"
     source: git
     version: "0.0.1+1"
   external_path:
@@ -511,7 +511,7 @@ packages:
       path: "."
       ref: "38951317afe79d953ab25733667bd96e172a80d3"
       resolved-ref: "38951317afe79d953ab25733667bd96e172a80d3"
-      url: "https://github.com/21pages/flutter_gpu_texture_renderer"
+      url: "https://github.com/rustdesk-org/flutter_gpu_texture_renderer"
     source: git
     version: "0.0.1"
   flutter_improved_scrolling:
@@ -790,13 +790,13 @@ packages:
     source: hosted
     version: "0.2.1+1"
   intl:
-    dependency: transitive
+    dependency: "direct overridden"
     description:
       name: intl
-      sha256: "3bc132a9dbce73a7e4a21a17d06e1878839ffbf975568bc875c60537824b0c4d"
+      sha256: d6f56758b7d3014a48af9701c085700aac781a92a87a62b1333b46d8879661cf
       url: "https://pub.dev"
     source: hosted
-    version: "0.18.1"
+    version: "0.19.0"
   io:
     dependency: transitive
     description:

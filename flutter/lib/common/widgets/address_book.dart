@@ -7,6 +7,7 @@ import 'package:flutter_hbb/common/formatter/id_formatter.dart';
 import 'package:flutter_hbb/common/hbbs/hbbs.dart';
 import 'package:flutter_hbb/common/widgets/peer_card.dart';
 import 'package:flutter_hbb/common/widgets/peers_view.dart';
+import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/popup_menu.dart';
 import 'package:flutter_hbb/models/ab_model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
@@ -35,16 +36,13 @@ class _AddressBookState extends State<AddressBook> {
   var menuPos = RelativeRect.fill;
 
   @override
-  void initState() {
-    super.initState();
-  }
-
-  @override
   Widget build(BuildContext context) => Obx(() {
         if (!gFFI.userModel.isLogin) {
           return Center(
               child: ElevatedButton(
                   onPressed: loginDialog, child: Text(translate("Login"))));
+        } else if (gFFI.userModel.networkError.isNotEmpty) {
+          return netWorkErrorWidget();
         } else {
           return Column(
             children: [
@@ -109,6 +107,7 @@ class _AddressBookState extends State<AddressBook> {
   }
 
   Widget _buildAddressBookMobile() {
+    const padding = 8.0;
     return Column(
       children: [
         Offstage(
@@ -119,7 +118,8 @@ class _AddressBookState extends State<AddressBook> {
                   border: Border.all(
                       color: Theme.of(context).colorScheme.background)),
               child: Container(
-                padding: const EdgeInsets.all(8.0),
+                padding:
+                    const EdgeInsets.fromLTRB(padding, 0, padding, padding),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -129,7 +129,6 @@ class _AddressBookState extends State<AddressBook> {
                       width: double.infinity,
                       child: _buildTags(),
                     ),
-                    _buildAbPermission(),
                   ],
                 ),
               ),
@@ -189,42 +188,73 @@ class _AddressBookState extends State<AddressBook> {
     if (!names.contains(gFFI.abModel.currentName.value)) {
       return Offstage();
     }
+    // order: personal, divider, character order
+    // https://pub.dev/packages/dropdown_button2#3-dropdownbutton2-with-items-of-different-heights-like-dividers
+    final personalAddressBookName = gFFI.abModel.personalAddressBookName();
+    bool contains = names.remove(personalAddressBookName);
+    names.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    if (contains) {
+      names.insert(0, personalAddressBookName);
+    }
+
+    Row buildItem(String e, {bool button = false}) {
+      return Row(
+        children: [
+          Expanded(
+            child: Tooltip(
+                waitDuration: Duration(milliseconds: 500),
+                message: gFFI.abModel.translatedName(e),
+                child: Text(
+                  gFFI.abModel.translatedName(e),
+                  style: button ? null : TextStyle(fontSize: 14.0),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: button ? TextAlign.center : null,
+                )),
+          ),
+        ],
+      );
+    }
+
+    final items = names
+        .map((e) => DropdownMenuItem(value: e, child: buildItem(e)))
+        .toList();
+    var menuItemStyleData = MenuItemStyleData(height: 36);
+    if (contains && items.length > 1) {
+      items.insert(1, DropdownMenuItem(enabled: false, child: Divider()));
+      List<double> customHeights = List.filled(items.length, 36);
+      customHeights[1] = 4;
+      menuItemStyleData = MenuItemStyleData(customHeights: customHeights);
+    }
     final TextEditingController textEditingController = TextEditingController();
 
+    final isOptFixed = isOptionFixed(kOptionCurrentAbName);
     return DropdownButton2<String>(
       value: gFFI.abModel.currentName.value,
-      onChanged: (value) {
-        if (value != null) {
-          gFFI.abModel.setCurrentName(value);
-          bind.setLocalFlutterOption(k: 'current-ab-name', v: value);
-        }
-      },
+      onChanged: isOptFixed
+          ? null
+          : (value) {
+              if (value != null) {
+                gFFI.abModel.setCurrentName(value);
+                bind.setLocalFlutterOption(k: kOptionCurrentAbName, v: value);
+              }
+            },
+      customButton: Container(
+        height: isDesktop ? 48 : 40,
+        child: Row(children: [
+          Expanded(
+              child: buildItem(gFFI.abModel.currentName.value, button: true)),
+          Icon(Icons.arrow_drop_down),
+        ]),
+      ),
       underline: Container(
         height: 0.7,
         color: Theme.of(context).dividerColor.withOpacity(0.1),
       ),
-      buttonStyleData: ButtonStyleData(height: 48),
-      menuItemStyleData: MenuItemStyleData(height: 36),
-      items: names
-          .map((e) => DropdownMenuItem(
-              value: e,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Tooltip(
-                        waitDuration: Duration(milliseconds: 500),
-                        message: gFFI.abModel.translatedName(e),
-                        child: Text(
-                          gFFI.abModel.translatedName(e),
-                          style: TextStyle(fontSize: 14.0),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        )),
-                  ),
-                ],
-              )))
-          .toList(),
+      menuItemStyleData: menuItemStyleData,
+      items: items,
       isExpanded: true,
+      isDense: true,
       dropdownSearchData: DropdownSearchData(
         searchController: textEditingController,
         searchInnerWidgetHeight: 50,
@@ -333,6 +363,7 @@ class _AddressBookState extends State<AddressBook> {
 
   @protected
   MenuEntryBase<String> syncMenuItem() {
+    final isOptFixed = isOptionFixed(syncAbOption);
     return MenuEntrySwitch<String>(
       switchType: SwitchType.scheckbox,
       text: translate('Sync with recent sessions'),
@@ -343,11 +374,13 @@ class _AddressBookState extends State<AddressBook> {
         gFFI.abModel.setShouldAsync(v);
       },
       dismissOnClicked: true,
+      enabled: (!isOptFixed).obs,
     );
   }
 
   @protected
   MenuEntryBase<String> sortMenuItem() {
+    final isOptFixed = isOptionFixed(sortAbTagsOption);
     return MenuEntrySwitch<String>(
       switchType: SwitchType.scheckbox,
       text: translate('Sort tags'),
@@ -355,15 +388,18 @@ class _AddressBookState extends State<AddressBook> {
         return shouldSortTags();
       },
       setter: (bool v) async {
-        bind.mainSetLocalOption(key: sortAbTagsOption, value: v ? 'Y' : '');
+        bind.mainSetLocalOption(
+            key: sortAbTagsOption, value: v ? 'Y' : defaultOptionNo);
         gFFI.abModel.sortTags.value = v;
       },
       dismissOnClicked: true,
+      enabled: (!isOptFixed).obs,
     );
   }
 
   @protected
   MenuEntryBase<String> filterMenuItem() {
+    final isOptFixed = isOptionFixed(filterAbTagOption);
     return MenuEntrySwitch<String>(
       switchType: SwitchType.scheckbox,
       text: translate('Filter by intersection'),
@@ -371,10 +407,12 @@ class _AddressBookState extends State<AddressBook> {
         return filterAbTagByIntersection();
       },
       setter: (bool v) async {
-        bind.mainSetLocalOption(key: filterAbTagOption, value: v ? 'Y' : '');
+        bind.mainSetLocalOption(
+            key: filterAbTagOption, value: v ? 'Y' : defaultOptionNo);
         gFFI.abModel.filterByIntersection.value = v;
       },
       dismissOnClicked: true,
+      enabled: (!isOptFixed).obs,
     );
   }
 
@@ -384,7 +422,8 @@ class _AddressBookState extends State<AddressBook> {
       if (canWrite) getEntry(translate("Add ID"), addIdToCurrentAb),
       if (canWrite) getEntry(translate("Add Tag"), abAddTag),
       getEntry(translate("Unselect all tags"), gFFI.abModel.unsetSelectedTags),
-      sortMenuItem(),
+      if (gFFI.abModel.legacyMode.value)
+        sortMenuItem(), // It's already sorted after pulling down
       if (canWrite) syncMenuItem(),
       filterMenuItem(),
       if (!gFFI.abModel.legacyMode.value && canWrite)

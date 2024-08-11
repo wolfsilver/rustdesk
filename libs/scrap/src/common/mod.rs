@@ -53,29 +53,30 @@ pub mod record;
 mod vpx;
 
 #[repr(usize)]
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub enum ImageFormat {
     Raw,
     ABGR,
     ARGB,
 }
+
 #[repr(C)]
 pub struct ImageRgb {
     pub raw: Vec<u8>,
     pub w: usize,
     pub h: usize,
     pub fmt: ImageFormat,
-    pub stride: usize,
+    pub align: usize,
 }
 
 impl ImageRgb {
-    pub fn new(fmt: ImageFormat, stride: usize) -> Self {
+    pub fn new(fmt: ImageFormat, align: usize) -> Self {
         Self {
             raw: Vec::new(),
             w: 0,
             h: 0,
             fmt,
-            stride,
+            align,
         }
     }
 
@@ -85,8 +86,13 @@ impl ImageRgb {
     }
 
     #[inline]
-    pub fn stride(&self) -> usize {
-        self.stride
+    pub fn align(&self) -> usize {
+        self.align
+    }
+
+    #[inline]
+    pub fn set_align(&mut self, align: usize) {
+        self.align = align;
     }
 }
 
@@ -203,9 +209,25 @@ impl<'a> EncodeInput<'a> {
 pub enum Pixfmt {
     BGRA,
     RGBA,
+    RGB565LE,
     I420,
     NV12,
     I444,
+}
+
+impl Pixfmt {
+    pub fn bpp(&self) -> usize {
+        match self {
+            Pixfmt::BGRA | Pixfmt::RGBA => 32,
+            Pixfmt::RGB565LE => 16,
+            Pixfmt::I420 | Pixfmt::NV12 => 12,
+            Pixfmt::I444 => 24,
+        }
+    }
+
+    pub fn bytes_per_pixel(&self) -> usize {
+        (self.bpp() + 7) / 8
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -373,20 +395,20 @@ pub trait GoogleImage {
     fn stride(&self) -> Vec<i32>;
     fn planes(&self) -> Vec<*mut u8>;
     fn chroma(&self) -> Chroma;
-    fn get_bytes_per_row(w: usize, fmt: ImageFormat, stride: usize) -> usize {
+    fn get_bytes_per_row(w: usize, fmt: ImageFormat, align: usize) -> usize {
         let bytes_per_pixel = match fmt {
             ImageFormat::Raw => 3,
             ImageFormat::ARGB | ImageFormat::ABGR => 4,
         };
         // https://github.com/lemenkov/libyuv/blob/6900494d90ae095d44405cd4cc3f346971fa69c9/source/convert_argb.cc#L128
         // https://github.com/lemenkov/libyuv/blob/6900494d90ae095d44405cd4cc3f346971fa69c9/source/convert_argb.cc#L129
-        (w * bytes_per_pixel + stride - 1) & !(stride - 1)
+        (w * bytes_per_pixel + align - 1) & !(align - 1)
     }
     // rgb [in/out] fmt and stride must be set in ImageRgb
     fn to(&self, rgb: &mut ImageRgb) {
         rgb.w = self.width();
         rgb.h = self.height();
-        let bytes_per_row = Self::get_bytes_per_row(rgb.w, rgb.fmt, rgb.stride());
+        let bytes_per_row = Self::get_bytes_per_row(rgb.w, rgb.fmt, rgb.align());
         rgb.raw.resize(rgb.h * bytes_per_row, 0);
         let stride = self.stride();
         let planes = self.planes();
@@ -480,4 +502,14 @@ pub trait GoogleImage {
             (y, u, v)
         }
     }
+}
+
+#[cfg(target_os = "android")]
+pub fn screen_size() -> (u16, u16, u16) {
+    SCREEN_SIZE.lock().unwrap().clone()
+}
+
+#[cfg(target_os = "android")]
+pub fn is_start() -> Option<bool> {
+    android::is_start()
 }

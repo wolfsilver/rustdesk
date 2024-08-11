@@ -22,6 +22,8 @@ enum PeerUiType { grid, tile, list }
 
 final peerCardUiType = PeerUiType.grid.obs;
 
+bool? hideUsernameOnCard;
+
 class _PeerCard extends StatefulWidget {
   final Peer peer;
   final PeerTabIndex tab;
@@ -130,8 +132,11 @@ class _PeerCardState extends State<_PeerCard>
 
   Widget _buildPeerTile(
       BuildContext context, Peer peer, Rx<BoxDecoration?>? deco) {
-    final name =
-        '${peer.username}${peer.username.isNotEmpty && peer.hostname.isNotEmpty ? '@' : ''}${peer.hostname}';
+    hideUsernameOnCard ??=
+        bind.mainGetBuildinOption(key: kHideUsernameOnCard) == 'Y';
+    final name = hideUsernameOnCard == true
+        ? peer.hostname
+        : '${peer.username}${peer.username.isNotEmpty && peer.hostname.isNotEmpty ? '@' : ''}${peer.hostname}';
     final greyStyle = TextStyle(
         fontSize: 11,
         color: Theme.of(context).textTheme.titleLarge?.color?.withOpacity(0.6));
@@ -239,8 +244,11 @@ class _PeerCardState extends State<_PeerCard>
 
   Widget _buildPeerCard(
       BuildContext context, Peer peer, Rx<BoxDecoration?> deco) {
-    final name =
-        '${peer.username}${peer.username.isNotEmpty && peer.hostname.isNotEmpty ? '@' : ''}${peer.hostname}';
+    hideUsernameOnCard ??=
+        bind.mainGetBuildinOption(key: kHideUsernameOnCard) == 'Y';
+    final name = hideUsernameOnCard == true
+        ? peer.hostname
+        : '${peer.username}${peer.username.isNotEmpty && peer.hostname.isNotEmpty ? '@' : ''}${peer.hostname}';
     final child = Card(
       color: Colors.transparent,
       elevation: 0,
@@ -628,8 +636,8 @@ abstract class BasePeerCard extends StatelessWidget {
 
   @protected
   Future<bool> _isForceAlwaysRelay(String id) async {
-    return (await bind.mainGetPeerOption(id: id, key: kOptionForceAlwaysRelay))
-        .isNotEmpty;
+    return option2bool(kOptionForceAlwaysRelay,
+        (await bind.mainGetPeerOption(id: id, key: kOptionForceAlwaysRelay)));
   }
 
   @protected
@@ -887,7 +895,7 @@ class RecentPeerCard extends BasePeerCard {
       menuItems.add(_createShortCutAction(peer.id));
     }
     menuItems.add(MenuEntryDivider());
-    if (isDesktop || isWebDesktop) {
+    if (isMobile || isDesktop || isWebDesktop) {
       menuItems.add(_renameAction(peer.id));
     }
     if (await bind.mainPeerHasPassword(id: peer.id)) {
@@ -943,7 +951,7 @@ class FavoritePeerCard extends BasePeerCard {
       menuItems.add(_createShortCutAction(peer.id));
     }
     menuItems.add(MenuEntryDivider());
-    if (isDesktop || isWebDesktop) {
+    if (isMobile || isDesktop || isWebDesktop) {
       menuItems.add(_renameAction(peer.id));
     }
     if (await bind.mainPeerHasPassword(id: peer.id)) {
@@ -1048,7 +1056,7 @@ class AddressBookPeerCard extends BasePeerCard {
     }
     if (gFFI.abModel.current.canWrite()) {
       menuItems.add(MenuEntryDivider());
-      if (isDesktop || isWebDesktop) {
+      if (isMobile || isDesktop || isWebDesktop) {
         menuItems.add(_renameAction(peer.id));
       }
       if (gFFI.abModel.current.isPersonal() && peer.hash.isNotEmpty) {

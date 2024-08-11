@@ -382,7 +382,7 @@ class MyIdMenu: Reactor.Component {
             <div>Fingerprint: " + handler.get_fingerprint() + " \
             <div .link .custom-event url='https://rustdesk.com/privacy.html'>" + translate("Privacy Statement") + "</div> \
             <div .link .custom-event url='https://rustdesk.com'>" + translate("Website") + "</div> \
-	    <div style='background: #2c8cff; color: white; padding: 1em; margin-top: 1em;'>Copyright &copy; " + new Date().getFullYear() + " Purslane Ltd.\
+	    <div style='background: #2c8cff; color: white; padding: 1em; margin-top: 1em;'>Copyright &copy; 2024 Purslane Ltd.\
             <br />" + handler.get_license() + " \
             <p style='font-weight: bold'>" + translate("Slogan_tip") + "</p>\
             </div>\
@@ -1149,7 +1149,7 @@ function showSettings() {
 function checkConnectStatus() {
     handler.check_mouse_time(); // trigger connection status updater
     self.timer(1s, function() {
-        var tmp = !!handler.get_option("stop-service");
+        var tmp = handler.get_option("stop-service") == "Y";
         if (tmp != service_stopped) {
             service_stopped = tmp;
             app.update();
@@ -1208,7 +1208,7 @@ function self.onMouse(evt) {
 }
 
 function check_if_overlay() {
-    if (!handler.get_option('allow-remote-config-modification')) {
+    if (handler.get_option('allow-remote-config-modification') != 'Y') {
         var time0 = getTime();
         handler.check_mouse_time();
         self.timer(120ms, function() {

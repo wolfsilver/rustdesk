@@ -117,9 +117,13 @@ class PlatformFFI {
             ? DynamicLibrary.open('librustdesk.so')
             : isWindows
                 ? DynamicLibrary.open('librustdesk.dll')
-                : isMacOS
-                    ? DynamicLibrary.open("liblibrustdesk.dylib")
-                    : DynamicLibrary.process();
+                :
+                // Use executable itself as the dynamic library for MacOS.
+                // Multiple dylib instances will cause some global instances to be invalid.
+                // eg. `lazy_static` objects in rust side, will be created more than once, which is not expected.
+                //
+                // isMacOS? DynamicLibrary.open("liblibrustdesk.dylib") :
+                DynamicLibrary.process();
     debugPrint('initializing FFI $_appType');
     try {
       _session_get_rgba = dylib.lookupFunction<F3Dart, F3>("session_get_rgba");
@@ -132,9 +136,10 @@ class PlatformFFI {
       _ffiBind = RustdeskImpl(dylib);
 
       if (isLinux) {
-        // Start a dbus service, no need to await
-        _ffiBind.mainStartDbusServer();
-        _ffiBind.mainStartPa();
+        if (isMain) {
+          // Start a dbus service for uri links, no need to await
+          _ffiBind.mainStartDbusServer();
+        }
       } else if (isMacOS && isMain) {
         // Start ipc service for uri links.
         _ffiBind.mainStartIpcUrlServer();

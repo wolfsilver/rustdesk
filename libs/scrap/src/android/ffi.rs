@@ -10,6 +10,7 @@ use jni::{
 
 use jni::errors::{Error as JniError, Result as JniResult};
 use lazy_static::lazy_static;
+use serde::Deserialize;
 use std::ops::Not;
 use std::sync::atomic::{AtomicPtr, Ordering::SeqCst};
 use std::sync::{Mutex, RwLock};
@@ -20,6 +21,7 @@ lazy_static! {
     static ref VIDEO_RAW: Mutex<FrameRaw> = Mutex::new(FrameRaw::new("video", MAX_VIDEO_FRAME_TIMEOUT));
     static ref AUDIO_RAW: Mutex<FrameRaw> = Mutex::new(FrameRaw::new("audio", MAX_AUDIO_FRAME_TIMEOUT));
     static ref NDK_CONTEXT_INITED: Mutex<bool> = Default::default();
+    static ref MEDIA_CODEC_INFOS: RwLock<Option<MediaCodecInfos>> = RwLock::new(None);
 }
 
 const MAX_VIDEO_FRAME_TIMEOUT: Duration = Duration::from_millis(100);
@@ -63,7 +65,7 @@ impl FrameRaw {
 
     // take inner data as slice
     // release when success
-    fn take<'a>(&mut self) -> Option<&'a [u8]> {
+    fn take<'a>(&mut self, dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {
         if self.enable.not() {
             return None;
         }
@@ -77,7 +79,14 @@ impl FrameRaw {
             }
             let slice = unsafe { std::slice::from_raw_parts(ptr, self.len) };
             self.release();
-            Some(slice)
+            if last.len() == slice.len() && crate::would_block_if_equal(last, slice).is_err() {
+                return None;
+            }
+            dst.resize(slice.len(), 0);
+            unsafe {
+                std::ptr::copy_nonoverlapping(slice.as_ptr(), dst.as_mut_ptr(), slice.len());
+            }
+            Some(())
         }
     }
 
@@ -87,12 +96,12 @@ impl FrameRaw {
     }
 }
 
-pub fn get_video_raw<'a>() -> Option<&'a [u8]> {
-    VIDEO_RAW.lock().ok()?.take()
+pub fn get_video_raw<'a>(dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {
+    VIDEO_RAW.lock().ok()?.take(dst, last)
 }
 
-pub fn get_audio_raw<'a>() -> Option<&'a [u8]> {
-    AUDIO_RAW.lock().ok()?.take()
+pub fn get_audio_raw<'a>(dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {
+    AUDIO_RAW.lock().ok()?.take(dst, last)
 }
 
 #[no_mangle]
@@ -154,19 +163,84 @@ pub extern "system" fn Java_ffi_FFI_init(env: JNIEnv, _class: JClass, ctx: JObje
     }
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct MediaCodecInfo {
+    pub name: String,
+    pub is_encoder: bool,
+    #[serde(default)]
+    pub hw: Option<bool>, // api 29+
+    pub mime_type: String,
+    pub surface: bool,
+    pub nv12: bool,
+    #[serde(default)]
+    pub low_latency: Option<bool>, // api 30+, decoder
+    pub min_bitrate: u32,
+    pub max_bitrate: u32,
+    pub min_width: usize,
+    pub max_width: usize,
+    pub min_height: usize,
+    pub max_height: usize,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MediaCodecInfos {
+    pub version: usize,
+    pub w: usize, // aligned
+    pub h: usize, // aligned
+    pub codecs: Vec<MediaCodecInfo>,
+}
+
+#[no_mangle]
+pub extern "system" fn Java_ffi_FFI_setCodecInfo(env: JNIEnv, _class: JClass, info: JString) {
+    let mut env = env;
+    if let Ok(info) = env.get_string(&info) {
+        let info: String = info.into();
+        if let Ok(infos) = serde_json::from_str::<MediaCodecInfos>(&info) {
+            *MEDIA_CODEC_INFOS.write().unwrap() = Some(infos);
+        }
+    }
+}
+
+pub fn get_codec_info() -> Option<MediaCodecInfos> {
+    MEDIA_CODEC_INFOS.read().unwrap().as_ref().cloned()
+}
+
+pub fn clear_codec_info() {
+    *MEDIA_CODEC_INFOS.write().unwrap() = None;
+}
+
+// another way to fix "reference table overflow" error caused by new_string and call_main_service_pointer_input frequently calld
+// is below, but here I change kind from string to int for performance
+/*
+        env.with_local_frame(10, || {
+            let kind = env.new_string(kind)?;
+            env.call_method(
+                ctx,
+                "rustPointerInput",
+                "(Ljava/lang/String;III)V",
+                &[
+                    JValue::Object(&JObject::from(kind)),
+                    JValue::Int(mask),
+                    JValue::Int(x),
+                    JValue::Int(y),
+                ],
+            )?;
+            Ok(JObject::null())
+        })?;
+*/
 pub fn call_main_service_pointer_input(kind: &str, mask: i32, x: i32, y: i32) -> JniResult<()> {
     if let (Some(jvm), Some(ctx)) = (
         JVM.read().unwrap().as_ref(),
         MAIN_SERVICE_CTX.read().unwrap().as_ref(),
     ) {
         let mut env = jvm.attach_current_thread_as_daemon()?;
-        let kind = env.new_string(kind)?;
+        let kind = if kind == "touch" { 0 } else { 1 };
         env.call_method(
             ctx,
             "rustPointerInput",
-            "(Ljava/lang/String;III)V",
+            "(IIII)V",
             &[
-                JValue::Object(&JObject::from(kind)),
+                JValue::Int(kind),
                 JValue::Int(mask),
                 JValue::Int(x),
                 JValue::Int(y),
@@ -204,19 +278,22 @@ pub fn call_main_service_get_by_name(name: &str) -> JniResult<String> {
         MAIN_SERVICE_CTX.read().unwrap().as_ref(),
     ) {
         let mut env = jvm.attach_current_thread_as_daemon()?;
-        let name = env.new_string(name)?;
-        let res = env
-            .call_method(
-                ctx,
-                "rustGetByName",
-                "(Ljava/lang/String;)Ljava/lang/String;",
-                &[JValue::Object(&JObject::from(name))],
-            )?
-            .l()?;
-        let res = JString::from(res);
-        let res = env.get_string(&res)?;
-        let res = res.to_string_lossy().to_string();
-        return Ok(res);
+        let res = env.with_local_frame(10, |env| -> JniResult<String> {
+            let name = env.new_string(name)?;
+            let res = env
+                .call_method(
+                    ctx,
+                    "rustGetByName",
+                    "(Ljava/lang/String;)Ljava/lang/String;",
+                    &[JValue::Object(&JObject::from(name))],
+                )?
+                .l()?;
+            let res = JString::from(res);
+            let res = env.get_string(&res)?;
+            let res = res.to_string_lossy().to_string();
+            Ok(res)
+        })?;
+        Ok(res)
     } else {
         return Err(JniError::ThrowFailed(-1));
     }
@@ -232,20 +309,23 @@ pub fn call_main_service_set_by_name(
         MAIN_SERVICE_CTX.read().unwrap().as_ref(),
     ) {
         let mut env = jvm.attach_current_thread_as_daemon()?;
-        let name = env.new_string(name)?;
-        let arg1 = env.new_string(arg1.unwrap_or(""))?;
-        let arg2 = env.new_string(arg2.unwrap_or(""))?;
+        env.with_local_frame(10, |env| -> JniResult<()> {
+            let name = env.new_string(name)?;
+            let arg1 = env.new_string(arg1.unwrap_or(""))?;
+            let arg2 = env.new_string(arg2.unwrap_or(""))?;
 
-        env.call_method(
-            ctx,
-            "rustSetByName",
-            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-            &[
-                JValue::Object(&JObject::from(name)),
-                JValue::Object(&JObject::from(arg1)),
-                JValue::Object(&JObject::from(arg2)),
-            ],
-        )?;
+            env.call_method(
+                ctx,
+                "rustSetByName",
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                &[
+                    JValue::Object(&JObject::from(name)),
+                    JValue::Object(&JObject::from(arg1)),
+                    JValue::Object(&JObject::from(arg2)),
+                ],
+            )?;
+            Ok(())
+        })?;
         return Ok(());
     } else {
         return Err(JniError::ThrowFailed(-1));
@@ -268,6 +348,10 @@ fn init_ndk_context() -> JniResult<()> {
             ndk_context::initialize_android_context(
                 jvm.get_java_vm_pointer() as _,
                 ctx.as_obj().as_raw() as _,
+            );
+            #[cfg(feature = "hwcodec")]
+            hwcodec::android::ffmpeg_set_java_vm(
+                jvm.get_java_vm_pointer() as _,
             );
         }
         *lock = true;

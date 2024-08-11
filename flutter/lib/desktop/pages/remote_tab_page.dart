@@ -46,7 +46,6 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
   static const IconData selectedIcon = Icons.desktop_windows_sharp;
   static const IconData unselectedIcon = Icons.desktop_windows_outlined;
 
-  late ToolbarState _toolbarState;
   String? peerId;
   bool _isScreenRectSet = false;
   int? _display;
@@ -54,7 +53,6 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
   var connectionMap = RxList<Widget>.empty(growable: true);
 
   _ConnectionTabPageState(Map<String, dynamic> params) {
-    _toolbarState = ToolbarState();
     RemoteCountState.init();
     peerId = params['id'];
     final sessionId = params['session_id'];
@@ -73,7 +71,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           final ffi = remotePage.ffi;
           bind.setCurSessionId(sessionId: ffi.sessionId);
         }
-        WindowController.fromWindowId(windowId())
+        WindowController.fromWindowId(params['windowId'])
             .setTitle(getWindowNameWithId(id));
         UnreadChatCountState.find(id).value = 0;
       };
@@ -91,7 +89,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           display: display,
           displays: displays?.cast<int>(),
           password: params['password'],
-          toolbarState: _toolbarState,
+          toolbarState: ToolbarState(),
           tabController: tabController,
           switchUuid: params['switch_uuid'],
           forceRelay: params['forceRelay'],
@@ -100,15 +98,14 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       ));
       _update_remote_count();
     }
+    tabController.onRemoved = (_, id) => onRemoveId(id);
+    rustDeskWinManager.setMethodHandler(_remoteMethodHandler);
   }
 
   @override
   void initState() {
     super.initState();
 
-    tabController.onRemoved = (_, id) => onRemoveId(id);
-
-    rustDeskWinManager.setMethodHandler(_remoteMethodHandler);
     if (!_isScreenRectSet) {
       Future.delayed(Duration.zero, () {
         restoreWindowPosition(
@@ -124,12 +121,6 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
   }
 
   @override
-  void dispose() {
-    super.dispose();
-    _toolbarState.save();
-  }
-
-  @override
   Widget build(BuildContext context) {
     final child = Scaffold(
       backgroundColor: Theme.of(context).colorScheme.background,
@@ -137,6 +128,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
         controller: tabController,
         onWindowCloseButton: handleWindowCloseButton,
         tail: const AddButton(),
+        selectedBorderColor: MyTheme.accent,
         pageViewBuilder: (pageView) => pageView,
         labelGetter: DesktopTab.tablabelGetter,
         tabBuilder: (key, icon, label, themeConf) => Obx(() {
@@ -251,15 +243,16 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
     final pi = ffi.ffiModel.pi;
     final perms = ffi.ffiModel.permissions;
     final sessionId = ffi.sessionId;
+    final toolbarState = remotePage.toolbarState;
     menu.addAll([
       MenuEntryButton<String>(
         childBuilder: (TextStyle? style) => Obx(() => Text(
               translate(
-                  _toolbarState.show.isTrue ? 'Hide Toolbar' : 'Show Toolbar'),
+                  toolbarState.show.isTrue ? 'Hide Toolbar' : 'Show Toolbar'),
               style: style,
             )),
         proc: () {
-          _toolbarState.switchShow();
+          toolbarState.switchShow(sessionId);
           cancelFunc();
         },
         padding: padding,
@@ -350,7 +343,6 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
 
   void onRemoveId(String id) async {
     if (tabController.state.value.tabs.isEmpty) {
-      stateGlobal.setFullscreen(false, procWnd: false);
       // Keep calling until the window status is hidden.
       //
       // Workaround for Windows:
@@ -384,9 +376,9 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       tabController.clear();
       return true;
     } else {
-      final opt = "enable-confirm-closing-tabs";
       final bool res;
-      if (!option2bool(opt, bind.mainGetLocalOption(key: opt))) {
+      if (!option2bool(kOptionEnableConfirmClosingTabs,
+          bind.mainGetLocalOption(key: kOptionEnableConfirmClosingTabs))) {
         res = true;
       } else {
         res = await closeConfirmDialog();
@@ -416,19 +408,19 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       final display = args['display'];
       final displays = args['displays'];
       final screenRect = parseParamScreenRect(args);
-      windowOnTop(windowId());
-      tryMoveToScreenAndSetFullscreen(screenRect);
-      if (tabController.length == 0) {
-        // Show the hidden window.
-        if (isMacOS && stateGlobal.closeOnFullscreen == true) {
-          stateGlobal.setFullscreen(true);
+      final prePeerCount = tabController.length;
+      Future.delayed(Duration.zero, () async {
+        if (stateGlobal.fullscreen.isTrue) {
+          await WindowController.fromWindowId(windowId()).setFullscreen(false);
+          stateGlobal.setFullscreen(false, procWnd: false);
         }
-        // Reset the state
-        stateGlobal.closeOnFullscreen = null;
-      }
+        await setNewConnectWindowFrame(
+            windowId(), id!, prePeerCount, display, screenRect);
+        Future.delayed(Duration(milliseconds: isWindows ? 100 : 0), () async {
+          await windowOnTop(windowId());
+        });
+      });
       ConnectionTypeState.init(id);
-      _toolbarState.setShow(
-          bind.mainGetUserDefaultOption(key: 'collapse_toolbar') != 'Y');
       tabController.add(TabInfo(
         key: id,
         label: id,
@@ -443,7 +435,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           display: display,
           displays: displays?.cast<int>(),
           password: args['password'],
-          toolbarState: _toolbarState,
+          toolbarState: ToolbarState(),
           tabController: tabController,
           switchUuid: switchUuid,
           forceRelay: args['forceRelay'],
@@ -522,6 +514,8 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           returnValue = jsonEncode(coords.toJson());
         }
       }
+    } else if (call.method == kWindowEventSetFullscreen) {
+      stateGlobal.setFullscreen(call.arguments == 'true');
     }
     _update_remote_count();
     return returnValue;

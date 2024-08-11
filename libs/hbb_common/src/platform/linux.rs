@@ -85,40 +85,19 @@ pub fn get_display_server_of_session(session: &str) -> String {
         run_loginctl(Some(vec!["show-session", "-p", "Type", session]))
     // Check session type of the session
     {
-        let display_server = String::from_utf8_lossy(&output.stdout)
+        String::from_utf8_lossy(&output.stdout)
             .replace("Type=", "")
             .trim_end()
-            .into();
-        if display_server == "tty" {
-            // If the type is tty...
-            if let Ok(output) = run_loginctl(Some(vec!["show-session", "-p", "TTY", session]))
-            // Get the tty number
-            {
-                let tty: String = String::from_utf8_lossy(&output.stdout)
-                    .replace("TTY=", "")
-                    .trim_end()
-                    .into();
-                if let Ok(xorg_results) = run_cmds(&format!("ps -e | grep \"{tty}.\\\\+Xorg\""))
-                // And check if Xorg is running on that tty
-                {
-                    if xorg_results.trim_end() != "" {
-                        // If it is, manually return "x11", otherwise return tty
-                        return "x11".to_owned();
-                    }
-                }
-            }
-        }
-        display_server
+            .into()
     } else {
         "".to_owned()
     };
     if display_server.is_empty() || display_server == "tty" {
-        // loginctl has not given the expected output.  try something else.
         if let Ok(sestype) = std::env::var("XDG_SESSION_TYPE") {
-            display_server = sestype;
+            if !sestype.is_empty() {
+                return sestype.to_lowercase();
+            }
         }
-    }
-    if display_server == "" {
         display_server = "x11".to_owned();
     }
     display_server.to_lowercase()
@@ -142,9 +121,17 @@ pub fn get_values_of_seat0_with_gdm_wayland(indices: &[usize]) -> Vec<String> {
     _get_values_of_seat0(indices, false)
 }
 
+// Ignore "3 sessions listed."
+fn ignore_loginctl_line(line: &str) -> bool {
+    line.contains("sessions") || line.split(" ").count() < 4
+}
+
 fn _get_values_of_seat0(indices: &[usize], ignore_gdm_wayland: bool) -> Vec<String> {
     if let Ok(output) = run_loginctl(None) {
         for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if ignore_loginctl_line(line) {
+                continue;
+            }
             if line.contains("seat0") {
                 if let Some(sid) = line.split_whitespace().next() {
                     if is_active(sid) {
@@ -163,6 +150,9 @@ fn _get_values_of_seat0(indices: &[usize], ignore_gdm_wayland: bool) -> Vec<Stri
 
         // some case, there is no seat0 https://github.com/rustdesk/rustdesk/issues/73
         for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if ignore_loginctl_line(line) {
+                continue;
+            }
             if let Some(sid) = line.split_whitespace().next() {
                 if is_active(sid) {
                     let d = get_display_server_of_session(sid);

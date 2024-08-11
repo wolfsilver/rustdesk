@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:bot_toast/bot_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/consts.dart';
@@ -177,11 +178,14 @@ void changeIdDialog() {
 }
 
 void changeWhiteList({Function()? callback}) async {
-  var newWhiteList = (await bind.mainGetOption(key: 'whitelist')).split(',');
-  var newWhiteListField = newWhiteList.join('\n');
+  final curWhiteList = await bind.mainGetOption(key: kOptionWhitelist);
+  var newWhiteListField = curWhiteList == defaultOptionWhitelist
+      ? ''
+      : curWhiteList.split(',').join('\n');
   var controller = TextEditingController(text: newWhiteListField);
   var msg = "";
   var isInProgress = false;
+  final isOptFixed = isOptionFixed(kOptionWhitelist);
   gFFI.dialogManager.show((setState, close, context) {
     return CustomAlertDialog(
       title: Text(translate("IP Whitelisting")),
@@ -201,6 +205,7 @@ void changeWhiteList({Function()? callback}) async {
                       errorText: msg.isEmpty ? null : translate(msg),
                     ),
                     controller: controller,
+                    enabled: !isOptFixed,
                     autofocus: true),
               ),
             ],
@@ -214,45 +219,53 @@ void changeWhiteList({Function()? callback}) async {
       ),
       actions: [
         dialogButton("Cancel", onPressed: close, isOutline: true),
-        dialogButton("Clear", onPressed: () async {
-          await bind.mainSetOption(key: 'whitelist', value: '');
-          callback?.call();
-          close();
-        }, isOutline: true),
-        dialogButton(
-          "OK",
-          onPressed: () async {
-            setState(() {
-              msg = "";
-              isInProgress = true;
-            });
-            newWhiteListField = controller.text.trim();
-            var newWhiteList = "";
-            if (newWhiteListField.isEmpty) {
-              // pass
-            } else {
-              final ips = newWhiteListField.trim().split(RegExp(r"[\s,;\n]+"));
-              // test ip
-              final ipMatch = RegExp(
-                  r"^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)(\/([1-9]|[1-2][0-9]|3[0-2])){0,1}$");
-              final ipv6Match = RegExp(
-                  r"^(((?:[0-9A-Fa-f]{1,4}))*((?::[0-9A-Fa-f]{1,4}))*::((?:[0-9A-Fa-f]{1,4}))*((?::[0-9A-Fa-f]{1,4}))*|((?:[0-9A-Fa-f]{1,4}))((?::[0-9A-Fa-f]{1,4})){7})(\/([1-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])){0,1}$");
-              for (final ip in ips) {
-                if (!ipMatch.hasMatch(ip) && !ipv6Match.hasMatch(ip)) {
-                  msg = "${translate("Invalid IP")} $ip";
-                  setState(() {
-                    isInProgress = false;
-                  });
-                  return;
-                }
-              }
-              newWhiteList = ips.join(',');
-            }
-            await bind.mainSetOption(key: 'whitelist', value: newWhiteList);
+        if (!isOptFixed)
+          dialogButton("Clear", onPressed: () async {
+            await bind.mainSetOption(
+                key: kOptionWhitelist, value: defaultOptionWhitelist);
             callback?.call();
             close();
-          },
-        ),
+          }, isOutline: true),
+        if (!isOptFixed)
+          dialogButton(
+            "OK",
+            onPressed: () async {
+              setState(() {
+                msg = "";
+                isInProgress = true;
+              });
+              newWhiteListField = controller.text.trim();
+              var newWhiteList = "";
+              if (newWhiteListField.isEmpty) {
+                // pass
+              } else {
+                final ips =
+                    newWhiteListField.trim().split(RegExp(r"[\s,;\n]+"));
+                // test ip
+                final ipMatch = RegExp(
+                    r"^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)(\/([1-9]|[1-2][0-9]|3[0-2])){0,1}$");
+                final ipv6Match = RegExp(
+                    r"^(((?:[0-9A-Fa-f]{1,4}))*((?::[0-9A-Fa-f]{1,4}))*::((?:[0-9A-Fa-f]{1,4}))*((?::[0-9A-Fa-f]{1,4}))*|((?:[0-9A-Fa-f]{1,4}))((?::[0-9A-Fa-f]{1,4})){7})(\/([1-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])){0,1}$");
+                for (final ip in ips) {
+                  if (!ipMatch.hasMatch(ip) && !ipv6Match.hasMatch(ip)) {
+                    msg = "${translate("Invalid IP")} $ip";
+                    setState(() {
+                      isInProgress = false;
+                    });
+                    return;
+                  }
+                }
+                newWhiteList = ips.join(',');
+              }
+              if (newWhiteList.trim().isEmpty) {
+                newWhiteList = defaultOptionWhitelist;
+              }
+              await bind.mainSetOption(
+                  key: kOptionWhitelist, value: newWhiteList);
+              callback?.call();
+              close();
+            },
+          ),
       ],
       onCancel: close,
     );
@@ -298,7 +311,7 @@ Future<String> changeDirectAccessPort(
         dialogButton("Cancel", onPressed: close, isOutline: true),
         dialogButton("OK", onPressed: () async {
           await bind.mainSetOption(
-              key: 'direct-access-port', value: controller.text);
+              key: kOptionDirectAccessPort, value: controller.text);
           close();
         }),
       ],
@@ -345,7 +358,7 @@ Future<String> changeAutoDisconnectTimeout(String old) async {
         dialogButton("Cancel", onPressed: close, isOutline: true),
         dialogButton("OK", onPressed: () async {
           await bind.mainSetOption(
-              key: 'auto-disconnect-timeout', value: controller.text);
+              key: kOptionAutoDisconnectTimeout, value: controller.text);
           close();
         }),
       ],
@@ -666,6 +679,7 @@ class PasswordWidget extends StatefulWidget {
     this.reRequestFocus = false,
     this.hintText,
     this.errorText,
+    this.title,
   }) : super(key: key);
 
   final TextEditingController controller;
@@ -673,6 +687,7 @@ class PasswordWidget extends StatefulWidget {
   final bool reRequestFocus;
   final String? hintText;
   final String? errorText;
+  final String? title;
 
   @override
   State<PasswordWidget> createState() => _PasswordWidgetState();
@@ -716,7 +731,7 @@ class _PasswordWidgetState extends State<PasswordWidget> {
   @override
   Widget build(BuildContext context) {
     return DialogTextField(
-      title: translate(DialogTextField.kPasswordTitle),
+      title: translate(widget.title ?? DialogTextField.kPasswordTitle),
       hintText: translate(widget.hintText ?? 'Enter your password'),
       controller: widget.controller,
       prefixIcon: DialogTextField.kPasswordIcon,
@@ -1753,6 +1768,66 @@ void renameDialog(
   });
 }
 
+void changeBot({Function()? callback}) async {
+  if (bind.mainHasValidBotSync()) {
+    await bind.mainSetOption(key: "bot", value: "");
+    callback?.call();
+    return;
+  }
+  String errorText = '';
+  bool loading = false;
+  final controller = TextEditingController();
+  gFFI.dialogManager.show((setState, close, context) {
+    onVerify() async {
+      final token = controller.text.trim();
+      if (token == "") return;
+      loading = true;
+      errorText = '';
+      setState(() {});
+      final error = await bind.mainVerifyBot(token: token);
+      if (error == "") {
+        callback?.call();
+        close();
+      } else {
+        errorText = translate(error);
+        loading = false;
+        setState(() {});
+      }
+    }
+
+    final codeField = TextField(
+      autofocus: true,
+      controller: controller,
+      decoration: InputDecoration(
+        hintText: translate('Token'),
+      ),
+    );
+
+    return CustomAlertDialog(
+      title: Text(translate("Telegram bot")),
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SelectableText(translate("enable-bot-desc"),
+                  style: TextStyle(fontSize: 12))
+              .marginOnly(bottom: 12),
+          Row(children: [Expanded(child: codeField)]),
+          if (errorText != '')
+            Text(errorText, style: TextStyle(color: Colors.red))
+                .marginOnly(top: 12),
+        ],
+      ),
+      actions: [
+        dialogButton("Cancel", onPressed: close, isOutline: true),
+        loading
+            ? CircularProgressIndicator()
+            : dialogButton("OK", onPressed: onVerify),
+      ],
+      onCancel: close,
+    );
+  });
+}
+
 void change2fa({Function()? callback}) async {
   if (bind.mainHasValid2FaSync()) {
     await bind.mainSetOption(key: "2fa", value: "");
@@ -2112,6 +2187,129 @@ void setSharedAbPasswordDialog(String abName, Peer peer) {
       ],
       onSubmit: isInputEmpty.value ? null : () => change(controller.text),
       onCancel: cancel,
+    );
+  });
+}
+
+void CommonConfirmDialog(OverlayDialogManager dialogManager, String content,
+    VoidCallback onConfirm) {
+  dialogManager.show((setState, close, context) {
+    submit() {
+      close();
+      onConfirm.call();
+    }
+
+    return CustomAlertDialog(
+      content: Row(
+        children: [
+          Expanded(
+            child: Text(content,
+                style: const TextStyle(fontSize: 15),
+                textAlign: TextAlign.start),
+          ),
+        ],
+      ).marginOnly(bottom: 12),
+      actions: [
+        dialogButton(translate("Cancel"), onPressed: close, isOutline: true),
+        dialogButton(translate("OK"), onPressed: submit),
+      ],
+      onSubmit: submit,
+      onCancel: close,
+    );
+  });
+}
+
+void changeUnlockPinDialog(String oldPin, Function() callback) {
+  final pinController = TextEditingController(text: oldPin);
+  final confirmController = TextEditingController(text: oldPin);
+  String? pinErrorText;
+  String? confirmationErrorText;
+  gFFI.dialogManager.show((setState, close, context) {
+    submit() async {
+      pinErrorText = null;
+      confirmationErrorText = null;
+      final pin = pinController.text.trim();
+      final confirm = confirmController.text.trim();
+      if (pin != confirm) {
+        setState(() {
+          confirmationErrorText =
+              translate('The confirmation is not identical.');
+        });
+        return;
+      }
+      final errorMsg = bind.mainSetUnlockPin(pin: pin);
+      if (errorMsg != '') {
+        setState(() {
+          pinErrorText = translate(errorMsg);
+        });
+        return;
+      }
+      callback.call();
+      close();
+    }
+
+    return CustomAlertDialog(
+      title: Text(translate("Set PIN")),
+      content: Column(
+        children: [
+          DialogTextField(
+            title: 'PIN',
+            controller: pinController,
+            obscureText: true,
+            errorText: pinErrorText,
+          ),
+          DialogTextField(
+            title: translate('Confirmation'),
+            controller: confirmController,
+            obscureText: true,
+            errorText: confirmationErrorText,
+          )
+        ],
+      ).marginOnly(bottom: 12),
+      actions: [
+        dialogButton(translate("Cancel"), onPressed: close, isOutline: true),
+        dialogButton(translate("OK"), onPressed: submit),
+      ],
+      onSubmit: submit,
+      onCancel: close,
+    );
+  });
+}
+
+void checkUnlockPinDialog(String correctPin, Function() passCallback) {
+  final controller = TextEditingController();
+  String? errorText;
+  gFFI.dialogManager.show((setState, close, context) {
+    submit() async {
+      final pin = controller.text.trim();
+      if (correctPin != pin) {
+        setState(() {
+          errorText = translate('Wrong PIN');
+        });
+        return;
+      }
+      passCallback.call();
+      close();
+    }
+
+    return CustomAlertDialog(
+      content: Row(
+        children: [
+          Expanded(
+              child: PasswordWidget(
+            title: 'PIN',
+            controller: controller,
+            errorText: errorText,
+            hintText: '',
+          ))
+        ],
+      ).marginOnly(bottom: 12),
+      actions: [
+        dialogButton(translate("Cancel"), onPressed: close, isOutline: true),
+        dialogButton(translate("OK"), onPressed: submit),
+      ],
+      onSubmit: submit,
+      onCancel: close,
     );
   });
 }

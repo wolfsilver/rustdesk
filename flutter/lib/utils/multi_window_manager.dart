@@ -174,7 +174,9 @@ class RustDeskMultiWindowManager {
                   windowId: windowId, peerId: remoteId);
             }
             await DesktopMultiWindow.invokeMethod(windowId, methodName, msg);
-            WindowController.fromWindowId(windowId).show();
+            if (methodName != kWindowEventNewRemoteDesktop) {
+              WindowController.fromWindowId(windowId).show();
+            }
             registerActiveWindow(windowId);
             return MultiWindowCallResult(windowId, null);
           }
@@ -334,10 +336,10 @@ class RustDeskMultiWindowManager {
   }
 
   Future<void> closeAllSubWindows() async {
-    await Future.wait(WindowType.values.map((e) => closeWindows(e)));
+    await Future.wait(WindowType.values.map((e) => _closeWindows(e)));
   }
 
-  Future<void> closeWindows(WindowType type) async {
+  Future<void> _closeWindows(WindowType type) async {
     if (type == WindowType.Main) {
       // skip main window, use window manager instead
       return;
@@ -345,7 +347,7 @@ class RustDeskMultiWindowManager {
 
     List<int> windows = [];
     try {
-      windows = await DesktopMultiWindow.getAllSubWindowIds();
+      windows = _findWindowsByType(type);
     } catch (e) {
       debugPrint('Failed to getAllSubWindowIds of $type, $e');
       return;
@@ -355,14 +357,9 @@ class RustDeskMultiWindowManager {
       return;
     }
     for (final wId in windows) {
-      debugPrint("closing multi window: ${type.toString()}");
+      debugPrint("closing multi window, type: ${type.toString()} id: $wId");
       await saveWindowPosition(type, windowId: wId);
       try {
-        // final ids = await DesktopMultiWindow.getAllSubWindowIds();
-        // if (!ids.contains(wId)) {
-        //   // no such window already
-        //   return;
-        // }
         await WindowController.fromWindowId(wId).setPreventClose(false);
         await WindowController.fromWindowId(wId).close();
         _activeWindows.remove(wId);
@@ -371,7 +368,6 @@ class RustDeskMultiWindowManager {
         return;
       }
     }
-    await _notifyActiveWindow();
     clearWindowType(type);
   }
 
@@ -402,14 +398,6 @@ class RustDeskMultiWindowManager {
     _activeWindows.add(windowId);
     _inactiveWindows.remove(windowId);
     await _notifyActiveWindow();
-  }
-
-  Future<void> destroyWindow(int windowId) async {
-    await WindowController.fromWindowId(windowId).setPreventClose(false);
-    await WindowController.fromWindowId(windowId).close();
-    _remoteDesktopWindows.remove(windowId);
-    _fileTransferWindows.remove(windowId);
-    _portForwardWindows.remove(windowId);
   }
 
   /// Remove active window which has [`windowId`]

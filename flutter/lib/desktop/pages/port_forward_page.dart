@@ -63,9 +63,12 @@ class _PortForwardPageState extends State<PortForwardPage>
         isSharedPassword: widget.isSharedPassword,
         forceRelay: widget.forceRelay,
         isRdp: widget.isRDP);
-    Get.put(_ffi, tag: 'pf_${widget.id}');
+    Get.put<FFI>(_ffi, tag: 'pf_${widget.id}');
     debugPrint("Port forward page init success with id ${widget.id}");
-    widget.tabController.onSelected?.call(widget.id);
+    // Call onSelected in post frame callback, since we cannot guarantee that the callback will not call setState.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      widget.tabController.onSelected?.call(widget.id);
+    });
   }
 
   @override
@@ -141,8 +144,9 @@ class _PortForwardPageState extends State<PortForwardPage>
         child: Text(translate(label)).marginOnly(left: _kTextLeftMargin));
 
     return Theme(
-      data: Theme.of(context)
-          .copyWith(backgroundColor: Theme.of(context).colorScheme.background),
+      data: Theme.of(context).copyWith(
+        colorScheme: Theme.of(context).colorScheme,
+      ),
       child: Obx(() => ListView.builder(
           controller: ScrollController(),
           itemCount: pfs.length + 2,
@@ -289,7 +293,7 @@ class _PortForwardPageState extends State<PortForwardPage>
         ).marginOnly(left: _kTextLeftMargin));
     return Theme(
       data: Theme.of(context)
-          .copyWith(backgroundColor: Theme.of(context).colorScheme.background),
+          .copyWith(colorScheme: Theme.of(context).colorScheme),
       child: ListView.builder(
           controller: ScrollController(),
           itemCount: 2,

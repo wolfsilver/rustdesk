@@ -34,6 +34,7 @@ class _FileManagerTabPageState extends State<FileManagerTabPage> {
       WindowController.fromWindowId(windowId())
           .setTitle(getWindowNameWithId(id));
     };
+    tabController.onRemoved = (_, id) => onRemoveId(id);
     tabController.add(TabInfo(
         key: params['id'],
         label: params['id'],
@@ -53,8 +54,6 @@ class _FileManagerTabPageState extends State<FileManagerTabPage> {
   @override
   void initState() {
     super.initState();
-
-    tabController.onRemoved = (_, id) => onRemoveId(id);
 
     rustDeskWinManager.setMethodHandler((call, fromWindowId) async {
       print(
@@ -97,6 +96,7 @@ class _FileManagerTabPageState extends State<FileManagerTabPage> {
           controller: tabController,
           onWindowCloseButton: handleWindowCloseButton,
           tail: const AddButton(),
+          selectedBorderColor: MyTheme.accent,
           labelGetter: DesktopTab.tablabelGetter,
         ));
     final tabWidget = isLinux
@@ -131,9 +131,9 @@ class _FileManagerTabPageState extends State<FileManagerTabPage> {
       tabController.clear();
       return true;
     } else {
-      final opt = "enable-confirm-closing-tabs";
       final bool res;
-      if (!option2bool(opt, bind.mainGetLocalOption(key: opt))) {
+      if (!option2bool(kOptionEnableConfirmClosingTabs,
+          bind.mainGetLocalOption(key: kOptionEnableConfirmClosingTabs))) {
         res = true;
       } else {
         res = await closeConfirmDialog();

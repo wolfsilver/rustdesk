@@ -92,13 +92,16 @@ class _FileManagerPageState extends State<FileManagerPage>
       _ffi.dialogManager
           .showLoading(translate('Connecting...'), onCancel: closeConnection);
     });
-    Get.put(_ffi, tag: 'ft_${widget.id}');
+    Get.put<FFI>(_ffi, tag: 'ft_${widget.id}');
     if (!isLinux) {
       WakelockPlus.enable();
     }
     debugPrint("File manager page init success with id ${widget.id}");
     _ffi.dialogManager.setOverlayState(_overlayKeyState);
-    widget.tabController.onSelected?.call(widget.id);
+    // Call onSelected in post frame callback, since we cannot guarantee that the callback will not call setState.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      widget.tabController.onSelected?.call(widget.id);
+    });
   }
 
   @override

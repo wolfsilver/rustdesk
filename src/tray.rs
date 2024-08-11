@@ -9,16 +9,29 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub fn start_tray() {
+    if crate::ui_interface::get_builtin_option(hbb_common::config::keys::OPTION_HIDE_TRAY) == "Y" {
+        #[cfg(target_os = "macos")]
+        {
+            crate::platform::macos::hide_dock();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            return;
+        }
+    }
     allow_err!(make_tray());
 }
 
-pub fn make_tray() -> hbb_common::ResultType<()> {
+fn make_tray() -> hbb_common::ResultType<()> {
     // https://github.com/tauri-apps/tray-icon/blob/dev/examples/tao.rs
     use hbb_common::anyhow::Context;
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
     use tray_icon::{
         menu::{Menu, MenuEvent, MenuItem},
-        TrayIconBuilder, TrayIconEvent as TrayEvent,
+        TrayIcon, TrayIconBuilder, TrayIconEvent as TrayEvent,
     };
     let icon;
     #[cfg(target_os = "macos")]
@@ -41,7 +54,7 @@ pub fn make_tray() -> hbb_common::ResultType<()> {
     let icon = tray_icon::Icon::from_rgba(icon_rgba, icon_width, icon_height)
         .context("Failed to open icon")?;
 
-    let event_loop = EventLoopBuilder::new().build();
+    let mut event_loop = EventLoopBuilder::new().build();
 
     let tray_menu = Menu::new();
     let quit_i = MenuItem::new(translate("Exit".to_owned()), true, None);
@@ -63,21 +76,12 @@ pub fn make_tray() -> hbb_common::ResultType<()> {
             )
         }
     };
-    let _tray_icon = Some(
-        TrayIconBuilder::new()
-            .with_menu(Box::new(tray_menu))
-            .with_tooltip(tooltip(0))
-            .with_icon(icon)
-            .with_icon_as_template(true) // mac only
-            .build()?,
-    );
-    let _tray_icon = Arc::new(Mutex::new(_tray_icon));
+    let mut _tray_icon: Arc<Mutex<Option<TrayIcon>>> = Default::default();
 
     let menu_channel = MenuEvent::receiver();
     let tray_channel = TrayEvent::receiver();
     #[cfg(windows)]
     let (ipc_sender, ipc_receiver) = std::sync::mpsc::channel::<Data>();
-    let mut docker_hiden = false;
 
     let open_func = move || {
         if cfg!(not(feature = "flutter")) {
@@ -110,15 +114,42 @@ pub fn make_tray() -> hbb_common::ResultType<()> {
     });
     #[cfg(windows)]
     let mut last_click = std::time::Instant::now();
-    event_loop.run(move |_event, _, control_flow| {
-        if !docker_hiden {
-            #[cfg(target_os = "macos")]
-            crate::platform::macos::hide_dock();
-            docker_hiden = true;
-        }
+    #[cfg(target_os = "macos")]
+    {
+        use tao::platform::macos::EventLoopExtMacOS;
+        event_loop.set_activation_policy(tao::platform::macos::ActivationPolicy::Accessory);
+    }
+    event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(
             std::time::Instant::now() + std::time::Duration::from_millis(100),
         );
+
+        if let tao::event::Event::NewEvents(tao::event::StartCause::Init) = event {
+            // We create the icon once the event loop is actually running
+            // to prevent issues like https://github.com/tauri-apps/tray-icon/issues/90
+            let tray = TrayIconBuilder::new()
+                .with_menu(Box::new(tray_menu.clone()))
+                .with_tooltip(tooltip(0))
+                .with_icon(icon.clone())
+                .with_icon_as_template(true) // mac only
+                .build();
+            match tray {
+                Ok(tray) => _tray_icon = Arc::new(Mutex::new(Some(tray))),
+                Err(err) => {
+                    log::error!("Failed to create tray icon: {}", err);
+                }
+            };
+
+            // We have to request a redraw here to have the icon actually show up.
+            // Tao only exposes a redraw method on the Window so we use core-foundation directly.
+            #[cfg(target_os = "macos")]
+            unsafe {
+                use core_foundation::runloop::{CFRunLoopGetMain, CFRunLoopWakeUp};
+
+                let rl = CFRunLoopGetMain();
+                CFRunLoopWakeUp(rl);
+            }
+        }
 
         if let Ok(event) = menu_channel.try_recv() {
             if event.id == quit_i.id() {
@@ -138,14 +169,23 @@ pub fn make_tray() -> hbb_common::ResultType<()> {
 
         if let Ok(_event) = tray_channel.try_recv() {
             #[cfg(target_os = "windows")]
-            if _event.click_type == tray_icon::ClickType::Left
-                || _event.click_type == tray_icon::ClickType::Double
-            {
-                if last_click.elapsed() < std::time::Duration::from_secs(1) {
-                    return;
+            match _event {
+                TrayEvent::Click {
+                    button,
+                    button_state,
+                    ..
+                } => {
+                    if button == tray_icon::MouseButton::Left
+                        && button_state == tray_icon::MouseButtonState::Up
+                    {
+                        if last_click.elapsed() < std::time::Duration::from_secs(1) {
+                            return;
+                        }
+                        open_func();
+                        last_click = std::time::Instant::now();
+                    }
                 }
-                open_func();
-                last_click = std::time::Instant::now();
+                _ => {}
             }
         }
 

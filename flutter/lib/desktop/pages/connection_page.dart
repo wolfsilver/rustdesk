@@ -169,16 +169,12 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
     final status =
         jsonDecode(await bind.mainGetConnectStatus()) as Map<String, dynamic>;
     final statusNum = status['status_num'] as int;
-    final preStatus = stateGlobal.svcStatus.value;
     if (statusNum == 0) {
       stateGlobal.svcStatus.value = SvcStatus.connecting;
     } else if (statusNum == -1) {
       stateGlobal.svcStatus.value = SvcStatus.notReady;
     } else if (statusNum == 1) {
       stateGlobal.svcStatus.value = SvcStatus.ready;
-      if (preStatus != SvcStatus.ready) {
-        gFFI.userModel.refreshCurrentUser();
-      }
     } else {
       stateGlobal.svcStatus.value = SvcStatus.notReady;
     }
@@ -212,14 +208,14 @@ class _ConnectionPageState extends State<ConnectionPage>
   void initState() {
     super.initState();
     if (_idController.text.isEmpty) {
-      () async {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
         final lastRemoteId = await bind.mainGetLastRemoteId();
         if (lastRemoteId != _idController.id) {
           setState(() {
             _idController.id = lastRemoteId;
           });
         }
-      }();
+      });
     }
     Get.put<IDTextEditingController>(_idController);
     windowManager.addListener(this);
@@ -340,7 +336,7 @@ class _ConnectionPageState extends State<ConnectionPage>
                           ?.merge(TextStyle(height: 1)),
                     ).marginOnly(right: 4),
                     Tooltip(
-                      waitDuration: Duration(milliseconds: 0),
+                      waitDuration: Duration(milliseconds: 300),
                       message: translate("id_input_tip"),
                       child: Icon(
                         Icons.help_outline_outlined,
