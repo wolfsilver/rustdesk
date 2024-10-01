@@ -50,6 +50,9 @@ final isLinux = isLinux_;
 final isDesktop = isDesktop_;
 final isWeb = isWeb_;
 final isWebDesktop = isWebDesktop_;
+final isWebOnWindows = isWebOnWindows_;
+final isWebOnLinux = isWebOnLinux_;
+final isWebOnMacOs = isWebOnMacOS_;
 var isMobile = isAndroid || isIOS;
 var version = '';
 int androidVersion = 0;
@@ -347,6 +350,9 @@ class MyTheme {
     hoverColor: Color.fromARGB(255, 224, 224, 224),
     scaffoldBackgroundColor: Colors.white,
     dialogBackgroundColor: Colors.white,
+    appBarTheme: AppBarTheme(
+      shadowColor: Colors.transparent,
+    ),
     dialogTheme: DialogTheme(
       elevation: 15,
       shape: RoundedRectangleBorder(
@@ -442,6 +448,9 @@ class MyTheme {
     hoverColor: Color.fromARGB(255, 45, 46, 53),
     scaffoldBackgroundColor: Color(0xFF18191E),
     dialogBackgroundColor: Color(0xFF18191E),
+    appBarTheme: AppBarTheme(
+      shadowColor: Colors.transparent,
+    ),
     dialogTheme: DialogTheme(
       elevation: 15,
       shape: RoundedRectangleBorder(
@@ -547,7 +556,7 @@ class MyTheme {
 
   static void changeDarkMode(ThemeMode mode) async {
     Get.changeThemeMode(mode);
-    if (desktopType == DesktopType.main || isAndroid || isIOS) {
+    if (desktopType == DesktopType.main || isAndroid || isIOS || isWeb) {
       if (mode == ThemeMode.system) {
         await bind.mainSetLocalOption(
             key: kCommConfKeyTheme, value: defaultOptionTheme);
@@ -555,7 +564,7 @@ class MyTheme {
         await bind.mainSetLocalOption(
             key: kCommConfKeyTheme, value: mode.toShortString());
       }
-      await bind.mainChangeTheme(dark: mode.toShortString());
+      if (!isWeb) await bind.mainChangeTheme(dark: mode.toShortString());
       // Synchronize the window theme of the system.
       updateSystemWindowTheme();
     }
@@ -3145,6 +3154,7 @@ class _ReconnectCountDownButtonState extends State<_ReconnectCountDownButton> {
 
 importConfig(List<TextEditingController>? controllers, List<RxString>? errMsgs,
     String? text) {
+  text = text?.trim();
   if (text != null && text.isNotEmpty) {
     try {
       final sc = ServerConfig.decode(text);
@@ -3492,7 +3502,8 @@ Widget buildVirtualWindowFrame(BuildContext context, Widget child) {
   );
 }
 
-get windowEdgeSize => isLinux && !_linuxWindowResizable ? 0.0 : kWindowEdgeSize;
+get windowResizeEdgeSize =>
+    isLinux && !_linuxWindowResizable ? 0.0 : kWindowResizeEdgeSize;
 
 // `windowManager.setResizable(false)` will reset the window size to the default size on Linux and then set unresizable.
 // See _linuxWindowResizable for more details.
@@ -3570,3 +3581,19 @@ Widget netWorkErrorWidget() {
     ],
   ));
 }
+
+List<ResizeEdge>? get windowManagerEnableResizeEdges => isWindows
+    ? [
+        ResizeEdge.topLeft,
+        ResizeEdge.top,
+        ResizeEdge.topRight,
+      ]
+    : null;
+
+List<SubWindowResizeEdge>? get subWindowManagerEnableResizeEdges => isWindows
+    ? [
+        SubWindowResizeEdge.topLeft,
+        SubWindowResizeEdge.top,
+        SubWindowResizeEdge.topRight,
+      ]
+    : null;

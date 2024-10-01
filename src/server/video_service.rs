@@ -486,6 +486,7 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut repeat_encode_counter = 0;
     let repeat_encode_max = 10;
     let mut encode_fail_counter = 0;
+    let mut first_frame = true;
 
     while sp.ok() {
         #[cfg(windows)]
@@ -540,7 +541,7 @@ fn run(vs: VideoService) -> ResultType<()> {
             VRamEncoder::set_fallback_gdi(display_idx, true);
             bail!("SWITCH");
         }
-        check_privacy_mode_changed(&sp, c.privacy_mode_id)?;
+        check_privacy_mode_changed(&sp, display_idx, &c)?;
         #[cfg(windows)]
         {
             if crate::platform::windows::desktop_changed()
@@ -574,6 +575,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         &mut encoder,
                         recorder.clone(),
                         &mut encode_fail_counter,
+                        &mut first_frame,
                     )?;
                     frame_controller.set_send(now, send_conn_ids);
                 }
@@ -629,6 +631,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                             &mut encoder,
                             recorder.clone(),
                             &mut encode_fail_counter,
+                            &mut first_frame,
                         )?;
                         frame_controller.set_send(now, send_conn_ids);
                     }
@@ -659,7 +662,7 @@ fn run(vs: VideoService) -> ResultType<()> {
         let timeout_millis = 3_000u64;
         let wait_begin = Instant::now();
         while wait_begin.elapsed().as_millis() < timeout_millis as _ {
-            check_privacy_mode_changed(&sp, c.privacy_mode_id)?;
+            check_privacy_mode_changed(&sp, display_idx, &c)?;
             frame_controller.try_wait_next(&mut fetched_conn_ids, 300);
             // break if all connections have received current frame
             if fetched_conn_ids.len() >= frame_controller.send_conn_ids.len() {
@@ -876,9 +879,13 @@ fn check_change_scale(hardware: bool) -> ResultType<()> {
     Ok(())
 }
 
-fn check_privacy_mode_changed(sp: &GenericService, privacy_mode_id: i32) -> ResultType<()> {
+fn check_privacy_mode_changed(
+    sp: &GenericService,
+    display_idx: usize,
+    ci: &CapturerInfo,
+) -> ResultType<()> {
     let privacy_mode_id_2 = get_privacy_mode_conn_id().unwrap_or(INVALID_PRIVACY_MODE_CONN_ID);
-    if privacy_mode_id != privacy_mode_id_2 {
+    if ci.privacy_mode_id != privacy_mode_id_2 {
         if privacy_mode_id_2 != INVALID_PRIVACY_MODE_CONN_ID {
             let msg_out = crate::common::make_privacy_mode_msg(
                 back_notification::PrivacyModeState::PrvOnByOther,
@@ -887,6 +894,7 @@ fn check_privacy_mode_changed(sp: &GenericService, privacy_mode_id: i32) -> Resu
             sp.send_to_others(msg_out, privacy_mode_id_2);
         }
         log::info!("switch due to privacy mode changed");
+        try_broadcast_display_changed(&sp, display_idx, ci, true).ok();
         bail!("SWITCH");
     }
     Ok(())
@@ -901,6 +909,7 @@ fn handle_one_frame(
     encoder: &mut Encoder,
     recorder: Arc<Mutex<Option<Recorder>>>,
     encode_fail_counter: &mut usize,
+    first_frame: &mut bool,
 ) -> ResultType<HashSet<i32>> {
     sp.snapshot(|sps| {
         // so that new sub and old sub share the same encoder after switch
@@ -912,6 +921,8 @@ fn handle_one_frame(
     })?;
 
     let mut send_conn_ids: HashSet<i32> = Default::default();
+    let first = *first_frame;
+    *first_frame = false;
     match encoder.encode_to_message(frame, ms) {
         Ok(mut vf) => {
             *encode_fail_counter = 0;
@@ -926,17 +937,23 @@ fn handle_one_frame(
             send_conn_ids = sp.send_video_frame(msg);
         }
         Err(e) => {
-            let max_fail_times = if cfg!(target_os = "android") && encoder.is_hardware() {
-                12
-            } else {
-                6
-            };
             *encode_fail_counter += 1;
-            if *encode_fail_counter >= max_fail_times {
+            // Encoding errors are not frequent except on Android
+            if !cfg!(target_os = "android") {
+                log::error!("encode fail: {e:?}, times: {}", *encode_fail_counter,);
+            }
+            let max_fail_times = if cfg!(target_os = "android") && encoder.is_hardware() {
+                9
+            } else {
+                3
+            };
+            let repeat = !encoder.latency_free();
+            // repeat encoders can reach max_fail_times on the first frame
+            if (first && !repeat) || *encode_fail_counter >= max_fail_times {
                 *encode_fail_counter = 0;
                 if encoder.is_hardware() {
                     encoder.disable();
-                    log::error!("switch due to encoding fails more than {max_fail_times} times");
+                    log::error!("switch due to encoding fails, first frame: {first}, error: {e:?}");
                     bail!("SWITCH");
                 }
             }

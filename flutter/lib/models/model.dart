@@ -7,12 +7,14 @@ import 'dart:ui' as ui;
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hbb/common/widgets/peers_view.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/ab_model.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/cm_file_model.dart';
 import 'package:flutter_hbb/models/file_model.dart';
 import 'package:flutter_hbb/models/group_model.dart';
+import 'package:flutter_hbb/models/peer_model.dart';
 import 'package:flutter_hbb/models/peer_tab_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_hbb/models/user_model.dart';
@@ -304,8 +306,13 @@ class FfiModel with ChangeNotifier {
       } else if (name == 'job_progress') {
         parent.target?.fileModel.jobController.tryUpdateJobProgress(evt);
       } else if (name == 'job_done') {
-        parent.target?.fileModel.jobController.jobDone(evt);
-        parent.target?.fileModel.refreshAll();
+        bool? refresh =
+            await parent.target?.fileModel.jobController.jobDone(evt);
+        if (refresh == true) {
+          // many job done for delete directory
+          // todo: refresh may not work when confirm delete local directory
+          parent.target?.fileModel.refreshAll();
+        }
       } else if (name == 'job_error') {
         parent.target?.fileModel.jobController.jobError(evt);
       } else if (name == 'override_file_confirm') {
@@ -492,10 +499,12 @@ class FfiModel with ChangeNotifier {
     newDisplay.width = int.tryParse(evt['width']) ?? newDisplay.width;
     newDisplay.height = int.tryParse(evt['height']) ?? newDisplay.height;
     newDisplay.cursorEmbedded = int.tryParse(evt['cursor_embedded']) == 1;
-    newDisplay.originalWidth =
-        int.tryParse(evt['original_width']) ?? kInvalidResolutionValue;
-    newDisplay.originalHeight =
-        int.tryParse(evt['original_height']) ?? kInvalidResolutionValue;
+    newDisplay.originalWidth = int.tryParse(
+            evt['original_width'] ?? kInvalidResolutionValue.toString()) ??
+        kInvalidResolutionValue;
+    newDisplay.originalHeight = int.tryParse(
+            evt['original_height'] ?? kInvalidResolutionValue.toString()) ??
+        kInvalidResolutionValue;
     newDisplay._scale = _pi.scaleOfDisplay(display);
     _pi.displays[display] = newDisplay;
 
@@ -788,7 +797,7 @@ class FfiModel with ChangeNotifier {
         isRefreshing = false;
       }
       Map<String, dynamic> features = json.decode(evt['features']);
-      _pi.features.privacyMode = features['privacy_mode'] == 1;
+      _pi.features.privacyMode = features['privacy_mode'] == true;
       if (!isCache) {
         handleResolutions(peerId, evt["resolutions"]);
       }
@@ -832,7 +841,7 @@ class FfiModel with ChangeNotifier {
       for (final mode in [kKeyMapMode, kKeyLegacyMode]) {
         if (bind.sessionIsKeyboardModeSupported(
             sessionId: sessionId, mode: mode)) {
-          bind.sessionSetKeyboardMode(sessionId: sessionId, value: mode);
+          await bind.sessionSetKeyboardMode(sessionId: sessionId, value: mode);
           break;
         }
       }
@@ -2178,6 +2187,7 @@ class CursorModel with ChangeNotifier {
       debugPrint("deleting cursor with key $k");
       deleteCustomCursor(k);
     }
+    resetSystemCursor();
   }
 
   trySetRemoteWindowCoords() {
@@ -2224,8 +2234,10 @@ class QualityMonitorModel with ChangeNotifier {
 
   updateQualityStatus(Map<String, dynamic> evt) {
     try {
-      if ((evt['speed'] as String).isNotEmpty) _data.speed = evt['speed'];
-      if ((evt['fps'] as String).isNotEmpty) {
+      if (evt.containsKey('speed') && (evt['speed'] as String).isNotEmpty) {
+        _data.speed = evt['speed'];
+      }
+      if (evt.containsKey('fps') && (evt['fps'] as String).isNotEmpty) {
         final fps = jsonDecode(evt['fps']) as Map<String, dynamic>;
         final pi = parent.target?.ffiModel.pi;
         if (pi != null) {
@@ -2246,14 +2258,18 @@ class QualityMonitorModel with ChangeNotifier {
           _data.fps = null;
         }
       }
-      if ((evt['delay'] as String).isNotEmpty) _data.delay = evt['delay'];
-      if ((evt['target_bitrate'] as String).isNotEmpty) {
+      if (evt.containsKey('delay') && (evt['delay'] as String).isNotEmpty) {
+        _data.delay = evt['delay'];
+      }
+      if (evt.containsKey('target_bitrate') &&
+          (evt['target_bitrate'] as String).isNotEmpty) {
         _data.targetBitrate = evt['target_bitrate'];
       }
-      if ((evt['codec_format'] as String).isNotEmpty) {
+      if (evt.containsKey('codec_format') &&
+          (evt['codec_format'] as String).isNotEmpty) {
         _data.codecFormat = evt['codec_format'];
       }
-      if ((evt['chroma'] as String).isNotEmpty) {
+      if (evt.containsKey('chroma') && (evt['chroma'] as String).isNotEmpty) {
         _data.chroma = evt['chroma'];
       }
       notifyListeners();
@@ -2383,6 +2399,9 @@ class FFI {
   late final ElevationModel elevationModel; // session
   late final CmFileModel cmFileModel; // cm
   late final TextureModel textureModel; //session
+  late final Peers recentPeersModel; // global
+  late final Peers favoritePeersModel; // global
+  late final Peers lanPeersModel; // global
 
   FFI(SessionID? sId) {
     sessionId = sId ?? (isDesktop ? Uuid().v4obj() : _constSessionId);
@@ -2403,6 +2422,16 @@ class FFI {
     elevationModel = ElevationModel(WeakReference(this));
     cmFileModel = CmFileModel(WeakReference(this));
     textureModel = TextureModel(WeakReference(this));
+    recentPeersModel = Peers(
+        name: PeersModelName.recent,
+        loadEvent: LoadEvent.recent,
+        getInitPeers: null);
+    favoritePeersModel = Peers(
+        name: PeersModelName.favorite,
+        loadEvent: LoadEvent.favorite,
+        getInitPeers: null);
+    lanPeersModel = Peers(
+        name: PeersModelName.lan, loadEvent: LoadEvent.lan, getInitPeers: null);
   }
 
   /// Mobile reuse FFI
@@ -2497,6 +2526,7 @@ class FFI {
         onEvent2UIRgba();
         imageModel.onRgba(display, data);
       });
+      this.id = id;
       return;
     }
 
@@ -2611,8 +2641,9 @@ class FFI {
         remember: remember);
   }
 
-  void send2FA(SessionID sessionId, String code) {
-    bind.sessionSend2Fa(sessionId: sessionId, code: code);
+  void send2FA(SessionID sessionId, String code, bool trustThisDevice) {
+    bind.sessionSend2Fa(
+        sessionId: sessionId, code: code, trustThisDevice: trustThisDevice);
   }
 
   /// Close the remote session.

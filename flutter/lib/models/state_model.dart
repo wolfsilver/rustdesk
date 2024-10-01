@@ -14,11 +14,13 @@ class StateGlobal {
   bool _isMinimized = false;
   final RxBool isMaximized = false.obs;
   final RxBool _showTabBar = true.obs;
-  final RxDouble _resizeEdgeSize = RxDouble(windowEdgeSize);
+  final RxDouble _resizeEdgeSize = RxDouble(windowResizeEdgeSize);
   final RxDouble _windowBorderWidth = RxDouble(kWindowBorderWidth);
   final RxBool showRemoteToolBar = false.obs;
   final svcStatus = SvcStatus.notReady.obs;
   final RxBool isFocused = false.obs;
+
+  final isPortrait = false.obs;
 
   String _inputSource = '';
 
@@ -93,7 +95,7 @@ class StateGlobal {
       ? kFullScreenEdgeSize
       : isMaximized.isTrue
           ? kMaximizeEdgeSize
-          : windowEdgeSize;
+          : windowResizeEdgeSize;
 
   String getInputSource({bool force = false}) {
     if (force || _inputSource.isEmpty) {

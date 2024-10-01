@@ -260,7 +260,7 @@ showCmWindow({bool isStartup = false}) async {
     WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
         size: kConnectionManagerWindowSizeClosedChat, alwaysOnTop: true);
     await windowManager.waitUntilReadyToShow(windowOptions, null);
-    bind.mainHideDocker();
+    bind.mainHideDock();
     await Future.wait([
       windowManager.show(),
       windowManager.focus(),
@@ -288,14 +288,14 @@ hideCmWindow({bool isStartup = false}) async {
         size: kConnectionManagerWindowSizeClosedChat);
     windowManager.setOpacity(0);
     await windowManager.waitUntilReadyToShow(windowOptions, null);
-    bind.mainHideDocker();
+    bind.mainHideDock();
     await windowManager.minimize();
     await windowManager.hide();
     _isCmReadyToShow = true;
   } else if (_isCmReadyToShow) {
     if (await windowManager.getOpacity() != 0) {
       await windowManager.setOpacity(0);
-      bind.mainHideDocker();
+      bind.mainHideDock();
       await windowManager.minimize();
       await windowManager.hide();
     }
@@ -372,7 +372,7 @@ class App extends StatefulWidget {
   State<App> createState() => _AppState();
 }
 
-class _AppState extends State<App> {
+class _AppState extends State<App> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
@@ -396,6 +396,34 @@ class _AppState extends State<App> {
         bind.mainChangeTheme(dark: to.toShortString());
       }
     };
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _updateOrientation());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    _updateOrientation();
+  }
+
+  void _updateOrientation() {
+    if (isDesktop) return;
+
+    // Don't use `MediaQuery.of(context).orientation` in `didChangeMetrics()`,
+    // my test (Flutter 3.19.6, Android 14) is always the reverse value.
+    // https://github.com/flutter/flutter/issues/60899
+    // stateGlobal.isPortrait.value =
+    //     MediaQuery.of(context).orientation == Orientation.portrait;
+
+    final orientation = View.of(context).physicalSize.aspectRatio > 1
+        ? Orientation.landscape
+        : Orientation.portrait;
+    stateGlobal.isPortrait.value = orientation == Orientation.portrait;
   }
 
   @override

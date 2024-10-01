@@ -21,20 +21,20 @@ use winapi::{
         winuser::{
             ChangeDisplaySettingsExW, EnumDisplayDevicesW, EnumDisplaySettingsExW,
             EnumDisplaySettingsW, CDS_NORESET, CDS_RESET, CDS_SET_PRIMARY, CDS_UPDATEREGISTRY,
-            DISP_CHANGE_SUCCESSFUL, EDD_GET_DEVICE_INTERFACE_NAME, ENUM_CURRENT_SETTINGS,
-            ENUM_REGISTRY_SETTINGS,
+            DISP_CHANGE_FAILED, DISP_CHANGE_SUCCESSFUL, EDD_GET_DEVICE_INTERFACE_NAME,
+            ENUM_CURRENT_SETTINGS, ENUM_REGISTRY_SETTINGS,
         },
     },
 };
 
-pub(super) const PRIVACY_MODE_IMPL: &str = "privacy_mode_impl_virtual_display";
+pub(super) const PRIVACY_MODE_IMPL: &str = super::PRIVACY_MODE_IMPL_WIN_VIRTUAL_DISPLAY;
 
 const CONFIG_KEY_REG_RECOVERY: &str = "reg_recovery";
 
 struct Display {
     dm: DEVMODEW,
     name: [WCHAR; 32],
-    _primary: bool,
+    primary: bool,
 }
 
 pub struct PrivacyModeImpl {
@@ -135,7 +135,7 @@ impl PrivacyModeImpl {
             let display = Display {
                 dm,
                 name: dd.DeviceName,
-                _primary: primary,
+                primary,
             };
 
             let ds = virtual_display_manager::get_cur_device_string();
@@ -150,9 +150,25 @@ impl PrivacyModeImpl {
     }
 
     fn restore_plug_out_monitor(&mut self) {
-        let _ =
-            virtual_display_manager::plug_out_monitor_indices(&self.virtual_displays_added, true);
+        let _ = virtual_display_manager::plug_out_monitor_indices(
+            &self.virtual_displays_added,
+            true,
+            false,
+        );
         self.virtual_displays_added.clear();
+    }
+
+    #[inline]
+    fn change_display_settings_ex_err_msg(rc: i32) -> String {
+        if rc != DISP_CHANGE_FAILED {
+            format!("ret: {}", rc)
+        } else {
+            format!(
+                "ret: {}, last error: {:?}",
+                rc,
+                std::io::Error::last_os_error()
+            )
+        }
     }
 
     fn set_primary_display(&mut self) -> ResultType<()> {
@@ -224,13 +240,14 @@ impl PrivacyModeImpl {
                     NULL,
                 );
                 if rc != DISP_CHANGE_SUCCESSFUL {
+                    let err = Self::change_display_settings_ex_err_msg(rc);
                     log::error!(
-                        "Failed ChangeDisplaySettingsEx, device name: {:?}, flags: {}, ret: {}",
+                        "Failed ChangeDisplaySettingsEx, device name: {:?}, flags: {}, {}",
                         std::string::String::from_utf16(&dd.DeviceName),
                         flags,
-                        rc
+                        &err
                     );
-                    bail!("Failed ChangeDisplaySettingsEx, ret: {}", rc);
+                    bail!("Failed ChangeDisplaySettingsEx, {}", err);
                 }
 
                 // If we want to set dpi, the following references may be helpful.
@@ -264,13 +281,14 @@ impl PrivacyModeImpl {
                     NULL as _,
                 );
                 if rc != DISP_CHANGE_SUCCESSFUL {
+                    let err = Self::change_display_settings_ex_err_msg(rc);
                     log::error!(
-                        "Failed ChangeDisplaySettingsEx, device name: {:?}, flags: {}, ret: {}",
+                        "Failed ChangeDisplaySettingsEx, device name: {:?}, flags: {}, {}",
                         std::string::String::from_utf16(&display.name),
                         flags,
-                        rc
+                        &err
                     );
-                    bail!("Failed ChangeDisplaySettingsEx, ret: {}", rc);
+                    bail!("Failed ChangeDisplaySettingsEx, {}", err);
                 }
             }
         }
@@ -297,7 +315,7 @@ impl PrivacyModeImpl {
 
             // No physical displays, no need to use the privacy mode.
             if self.displays.is_empty() {
-                virtual_display_manager::plug_out_monitor_indices(&displays, false)?;
+                virtual_display_manager::plug_out_monitor_indices(&displays, false, false)?;
                 bail!(NO_PHYSICAL_DISPLAYS);
             }
 
@@ -327,9 +345,10 @@ impl PrivacyModeImpl {
             //     }
             // }
 
-            let ret = ChangeDisplaySettingsExW(NULL as _, NULL as _, NULL as _, flags, NULL as _);
-            if ret != DISP_CHANGE_SUCCESSFUL {
-                bail!("Failed ChangeDisplaySettingsEx, ret: {}", ret);
+            let rc = ChangeDisplaySettingsExW(NULL as _, NULL as _, NULL as _, flags, NULL as _);
+            if rc != DISP_CHANGE_SUCCESSFUL {
+                let err = Self::change_display_settings_ex_err_msg(rc);
+                bail!("Failed ChangeDisplaySettingsEx, {}", err);
             }
 
             // if !desk_current.is_null() {
@@ -340,6 +359,35 @@ impl PrivacyModeImpl {
             // }
         }
         Ok(())
+    }
+
+    fn restore(&mut self) {
+        Self::restore_displays(&self.displays);
+        Self::restore_displays(&self.virtual_displays);
+        allow_err!(Self::commit_change_display(0));
+        self.restore_plug_out_monitor();
+        self.displays.clear();
+        self.virtual_displays.clear();
+    }
+
+    fn restore_displays(displays: &[Display]) {
+        for display in displays {
+            unsafe {
+                let mut dm = display.dm.clone();
+                let flags = if display.primary {
+                    CDS_NORESET | CDS_UPDATEREGISTRY | CDS_SET_PRIMARY
+                } else {
+                    CDS_NORESET | CDS_UPDATEREGISTRY
+                };
+                ChangeDisplaySettingsExW(
+                    display.name.as_ptr(),
+                    &mut dm,
+                    std::ptr::null_mut(),
+                    flags,
+                    std::ptr::null_mut(),
+                );
+            }
+        }
     }
 }
 
@@ -415,14 +463,9 @@ impl PrivacyMode for PrivacyModeImpl {
     ) -> ResultType<()> {
         self.check_off_conn_id(conn_id)?;
         super::win_input::unhook()?;
-        let virtual_display_added = self.virtual_displays_added.len() > 0;
-        if virtual_display_added {
-            self.restore_plug_out_monitor();
-        }
+        let _tmp_ignore_changed_holder = crate::display_service::temp_ignore_displays_changed();
+        self.restore();
         restore_reg_connectivity(false);
-        if !virtual_display_added {
-            Self::commit_change_display(CDS_RESET)?;
-        }
 
         if self.conn_id != INVALID_PRIVACY_MODE_CONN_ID {
             if let Some(state) = state {
@@ -469,7 +512,7 @@ pub fn restore_reg_connectivity(plug_out_monitors: bool) {
         return;
     }
     if plug_out_monitors {
-        let _ = virtual_display_manager::plug_out_monitor(-1, true);
+        let _ = virtual_display_manager::plug_out_monitor(-1, true, false);
     }
     if let Ok(reg_recovery) =
         serde_json::from_str::<reg_display_settings::RegRecovery>(&config_recovery_value)

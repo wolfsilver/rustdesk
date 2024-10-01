@@ -26,7 +26,7 @@ use crossbeam_queue::ArrayQueue;
 use hbb_common::tokio::sync::mpsc::error::TryRecvError;
 use hbb_common::{
     allow_err,
-    config::{PeerConfig, TransferSerde},
+    config::{self, PeerConfig, TransferSerde},
     fs::{
         self, can_enable_overwrite_detection, get_job, get_string, new_send_confirm,
         DigestCheckResult, RemoveJobMeta,
@@ -73,6 +73,22 @@ pub struct Remote<T: InvokeUiSession> {
     fps_control: FpsControl,
     decode_fps: Arc<RwLock<Option<usize>>>,
     chroma: Arc<RwLock<Option<Chroma>>>,
+    peer_info: ParsedPeerInfo,
+}
+
+#[derive(Default)]
+struct ParsedPeerInfo {
+    platform: String,
+    is_installed: bool,
+    idd_impl: String,
+}
+
+impl ParsedPeerInfo {
+    fn is_support_virtual_display(&self) -> bool {
+        self.is_installed
+            && self.platform == "Windows"
+            && (self.idd_impl == "rustdesk_idd" || self.idd_impl == "amyuni_idd")
+    }
 }
 
 impl<T: InvokeUiSession> Remote<T> {
@@ -112,6 +128,7 @@ impl<T: InvokeUiSession> Remote<T> {
             fps_control: Default::default(),
             decode_fps,
             chroma,
+            peer_info: Default::default(),
         }
     }
 
@@ -336,6 +353,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     } else {
                         if let Err(e) = ContextSend::make_sure_enabled() {
                             log::error!("failed to restart clipboard context: {}", e);
+                            // to-do: Show msgbox with "Don't show again" option
                         };
                         log::debug!("Send system clipboard message to remote");
                         let msg = crate::clipboard_file::clip_2_msg(clip);
@@ -800,6 +818,25 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                 }
             }
+            Data::RenameFile((id, path, new_name, is_remote)) => {
+                if is_remote {
+                    let mut msg_out = Message::new();
+                    let mut file_action = FileAction::new();
+                    file_action.set_rename(FileRename {
+                        id,
+                        path,
+                        new_name,
+                        ..Default::default()
+                    });
+                    msg_out.set_file_action(file_action);
+                    allow_err!(peer.send(&msg_out).await);
+                } else {
+                    let err = fs::rename_file(&path, &new_name)
+                        .err()
+                        .map(|e| e.to_string());
+                    self.handle_job_status(id, -1, err);
+                }
+            }
             Data::RecordScreen(start, display, w, h, id) => {
                 let _ = self
                     .video_sender
@@ -921,23 +958,10 @@ impl<T: InvokeUiSession> Remote<T> {
         true
     }
 
-    async fn send_opts_after_login(&self, peer: &mut Stream) {
-        if let Some(opts) = self
-            .handler
-            .lc
-            .read()
-            .unwrap()
-            .get_option_message_after_login()
-        {
-            let mut misc = Misc::new();
-            misc.set_option(opts);
-            let mut msg_out = Message::new();
-            msg_out.set_misc(misc);
-            allow_err!(peer.send(&msg_out).await);
-        }
-    }
-
     async fn send_toggle_virtual_display_msg(&self, peer: &mut Stream) {
+        if !self.peer_info.is_support_virtual_display() {
+            return;
+        }
         let lc = self.handler.lc.read().unwrap();
         let displays = lc.get_option("virtual-display");
         for d in displays.split(',') {
@@ -961,6 +985,11 @@ impl<T: InvokeUiSession> Remote<T> {
             && lc.get_toggle_option("privacy-mode")
         {
             let impl_key = lc.get_option("privacy-mode-impl-key");
+            if impl_key == crate::privacy_mode::PRIVACY_MODE_IMPL_WIN_VIRTUAL_DISPLAY
+                && !self.peer_info.is_support_virtual_display()
+            {
+                return;
+            }
             let mut misc = Misc::new();
             misc.set_toggle_privacy_mode(TogglePrivacyMode {
                 impl_key,
@@ -1090,7 +1119,6 @@ impl<T: InvokeUiSession> Remote<T> {
                         self.first_frame = true;
                         self.handler.close_success();
                         self.handler.adapt_size();
-                        self.send_opts_after_login(peer).await;
                         self.send_toggle_virtual_display_msg(peer).await;
                         self.send_toggle_privacy_mode_msg(peer).await;
                     }
@@ -1135,6 +1163,10 @@ impl<T: InvokeUiSession> Remote<T> {
                 }
                 Some(message::Union::LoginResponse(lr)) => match lr.union {
                     Some(login_response::Union::Error(err)) => {
+                        if err == client::REQUIRE_2FA {
+                            self.handler.lc.write().unwrap().enable_trusted_devices =
+                                lr.enable_trusted_devices;
+                        }
                         if !self.handler.handle_login_error(&err) {
                             return false;
                         }
@@ -1142,6 +1174,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     Some(login_response::Union::PeerInfo(pi)) => {
                         let peer_version = pi.version.clone();
                         let peer_platform = pi.platform.clone();
+                        self.set_peer_info(&pi);
                         self.handler.handle_peer_info(pi);
                         self.check_clipboard_file_context();
                         if !(self.handler.is_file_transfer() || self.handler.is_port_forward()) {
@@ -1163,18 +1196,20 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
 
                             #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                            if let Some(msg_out) = crate::clipboard::get_current_clipboard_msg(
-                                &peer_version,
-                                &peer_platform,
-                                crate::clipboard::ClipboardSide::Client,
-                            ) {
-                                let sender = self.sender.clone();
-                                let permission_config = self.handler.get_permission_config();
-                                tokio::spawn(async move {
-                                    if permission_config.is_text_clipboard_required() {
-                                        sender.send(Data::Message(msg_out)).ok();
-                                    }
-                                });
+                            if self.handler.lc.read().unwrap().sync_init_clipboard.v {
+                                if let Some(msg_out) = crate::clipboard::get_current_clipboard_msg(
+                                    &peer_version,
+                                    &peer_platform,
+                                    crate::clipboard::ClipboardSide::Client,
+                                ) {
+                                    let sender = self.sender.clone();
+                                    let permission_config = self.handler.get_permission_config();
+                                    tokio::spawn(async move {
+                                        if permission_config.is_text_clipboard_required() {
+                                            sender.send(Data::Message(msg_out)).ok();
+                                        }
+                                    });
+                                }
                             }
 
                             // on connection established client
@@ -1585,7 +1620,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 },
                 Some(message::Union::MessageBox(msgbox)) => {
                     let mut link = msgbox.link;
-                    if let Some(v) = hbb_common::config::HELPER_URL.get(&link as &str) {
+                    if let Some(v) = config::HELPER_URL.get(&link as &str) {
                         link = v.to_string();
                     } else {
                         log::warn!("Message box ignore link {} for security", &link);
@@ -1630,6 +1665,25 @@ impl<T: InvokeUiSession> Remote<T> {
             }
         }
         true
+    }
+
+    fn set_peer_info(&mut self, pi: &PeerInfo) {
+        self.peer_info.platform = pi.platform.clone();
+        if let Ok(platform_additions) =
+            serde_json::from_str::<HashMap<String, serde_json::Value>>(&pi.platform_additions)
+        {
+            self.peer_info.is_installed = platform_additions
+                .get("is_installed")
+                .map(|v| v.as_bool())
+                .flatten()
+                .unwrap_or(false);
+            self.peer_info.idd_impl = platform_additions
+                .get("idd_impl")
+                .map(|v| v.as_str())
+                .flatten()
+                .unwrap_or_default()
+                .to_string();
+        }
     }
 
     async fn handle_back_notification(&mut self, notification: BackNotification) -> bool {
@@ -1838,7 +1892,7 @@ impl<T: InvokeUiSession> Remote<T> {
             return;
         };
 
-        let is_stopping_allowed = clip.is_stopping_allowed_from_peer();
+        let is_stopping_allowed = clip.is_beginning_message();
         let file_transfer_enabled = self.handler.lc.read().unwrap().enable_file_copy_paste.v;
         let stop = is_stopping_allowed && !file_transfer_enabled;
         log::debug!(
