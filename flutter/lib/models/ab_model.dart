@@ -33,6 +33,8 @@ bool filterAbTagByIntersection() {
 const _personalAddressBookName = "My address book";
 const _legacyAddressBookName = "Legacy address book";
 
+const kUntagged = "Untagged";
+
 enum ForcePullAb {
   listAndCurrent,
   current,
@@ -55,6 +57,9 @@ class AbModel {
   RxString get currentAbPushError => current.pushError;
   String? _personalAbGuid;
   RxBool legacyMode = false.obs;
+
+  // Only handles peers add/remove
+  final Map<String, VoidCallback> _peerIdUpdateListeners = {};
 
   final sortTags = shouldSortTags().obs;
   final filterByIntersection = filterAbTagByIntersection().obs;
@@ -135,7 +140,7 @@ class AbModel {
           debugPrint("pull ab list");
           List<AbProfile> abProfiles = List.empty(growable: true);
           abProfiles.add(AbProfile(_personalAbGuid!, _personalAddressBookName,
-              gFFI.userModel.userName.value, null, ShareRule.read.value));
+              gFFI.userModel.userName.value, null, ShareRule.read.value, null));
           // get all address book name
           await _getSharedAbProfiles(abProfiles);
           addressbooks.removeWhere((key, value) =>
@@ -186,6 +191,7 @@ class AbModel {
         debugPrint("pull current Ab error: $e");
       }
     }
+    _callbackPeerUpdate();
     if (listInitialized && current.initialized) {
       _saveCache();
     }
@@ -202,7 +208,7 @@ class AbModel {
         return false;
       }
       Map<String, dynamic> json =
-          _jsonDecodeRespMap(utf8.decode(resp.bodyBytes), resp.statusCode);
+          _jsonDecodeRespMap(decode_http_response(resp), resp.statusCode);
       if (json.containsKey('error')) {
         throw json['error'];
       }
@@ -228,7 +234,7 @@ class AbModel {
         return false;
       }
       Map<String, dynamic> json =
-          _jsonDecodeRespMap(utf8.decode(resp.bodyBytes), resp.statusCode);
+          _jsonDecodeRespMap(decode_http_response(resp), resp.statusCode);
       if (json.containsKey('error')) {
         throw json['error'];
       }
@@ -265,7 +271,7 @@ class AbModel {
         headers['Content-Type'] = "application/json";
         final resp = await http.post(uri, headers: headers);
         Map<String, dynamic> json =
-            _jsonDecodeRespMap(utf8.decode(resp.bodyBytes), resp.statusCode);
+            _jsonDecodeRespMap(decode_http_response(resp), resp.statusCode);
         if (json.containsKey('error')) {
           throw json['error'];
         }
@@ -340,6 +346,9 @@ class AbModel {
     final ab = addressbooks[name];
     if (ab == null) {
       return 'no such addressbook: $name';
+    }
+    for (var p in ps) {
+      ab.removeNonExistentTags(p);
     }
     String? errMsg = await ab.addPeers(ps);
     await pullNonLegacyAfterChange(name: name);
@@ -417,6 +426,7 @@ class AbModel {
         }
       });
     }
+    _callbackPeerUpdate();
     return ret;
   }
 
@@ -424,6 +434,7 @@ class AbModel {
 
 // #region tags
   Future<bool> addTags(List<String> tagList) async {
+    tagList.removeWhere((e) => e == kUntagged);
     final ret = await current.addTags(tagList, {});
     await pullNonLegacyAfterChange();
     _saveCache();
@@ -598,7 +609,7 @@ class AbModel {
             if (name == null || guid == null) {
               continue;
             }
-            ab = Ab(AbProfile(guid, name, '', '', ShareRule.read.value),
+            ab = Ab(AbProfile(guid, name, '', '', ShareRule.read.value, null),
                 name == _personalAddressBookName);
           }
           addressbooks[name] = ab;
@@ -616,6 +627,9 @@ class AbModel {
             ab.tagColors.value = Map<String, int>.from(map);
           }
         }
+      }
+      if (abEntries.isNotEmpty) {
+        _callbackPeerUpdate();
       }
     }
   }
@@ -645,6 +659,9 @@ class AbModel {
   }
 
   Color getCurrentAbTagColor(String tag) {
+    if (tag == kUntagged) {
+      return MyTheme.accent;
+    }
     int? colorValue = current.tagColors[tag];
     if (colorValue != null) {
       return Color(colorValue);
@@ -736,6 +753,42 @@ class AbModel {
     }
   }
 
+  void _callbackPeerUpdate() {
+    for (var listener in _peerIdUpdateListeners.values) {
+      listener();
+    }
+  }
+
+  void addPeerUpdateListener(String key, VoidCallback listener) {
+    _peerIdUpdateListeners[key] = listener;
+  }
+
+  void removePeerUpdateListener(String key) {
+    _peerIdUpdateListeners.remove(key);
+  }
+
+  String? getdefaultSharedPassword() {
+    if (current.isPersonal()) {
+      return null;
+    }
+    final profile = current.sharedProfile();
+    if (profile == null) {
+      return null;
+    }
+    try {
+      if (profile.info is Map) {
+        final password = (profile.info as Map)['password'];
+        if (password is String && password.isNotEmpty) {
+          return password;
+        }
+      }
+      return null;
+    } catch (e) {
+      debugPrint("getdefaultSharedPassword: $e");
+      return null;
+    }
+  }
+
 // #endregion
 }
 
@@ -747,7 +800,10 @@ abstract class BaseAb {
 
   final pullError = "".obs;
   final pushError = "".obs;
-  final abLoading = false.obs;
+  final abLoading = false
+      .obs; // Indicates whether the UI should show a loading state for the address book.
+  var abPulling =
+      false; // Tracks whether a pull operation is currently in progress to prevent concurrent pulls. Unlike abLoading, this is not tied to UI updates.
   bool initialized = false;
 
   String name();
@@ -762,17 +818,22 @@ abstract class BaseAb {
   }
 
   Future<void> pullAb({quiet = false}) async {
-    debugPrint("pull ab \"${name()}\"");
-    if (abLoading.value) return;
+    if (abPulling) return;
+    abPulling = true;
     if (!quiet) {
       abLoading.value = true;
       pullError.value = "";
     }
     initialized = false;
+    debugPrint("pull ab \"${name()}\"");
     try {
       initialized = await pullAbImpl(quiet: quiet);
-    } catch (_) {}
-    abLoading.value = false;
+    } catch (e) {
+      debugPrint("Error occurred while pulling address book: $e");
+    } finally {
+      abLoading.value = false;
+      abPulling = false;
+    }
   }
 
   Future<bool> pullAbImpl({quiet = false});
@@ -784,6 +845,18 @@ abstract class BaseAb {
 
   removePassword(Map<String, dynamic> p) {
     p.remove('password');
+  }
+
+  removeNonExistentTags(Map<String, dynamic> p) {
+    try {
+      final oldTags = p.remove('tags');
+      if (oldTags is List) {
+        final newTags = oldTags.where((e) => tagContainBy(e)).toList();
+        p['tags'] = newTags;
+      }
+    } catch (e) {
+      print("removeNonExistentTags: $e");
+    }
   }
 
   Future<bool> changeTagForPeers(List<String> ids, List<dynamic> tags);
@@ -874,7 +947,7 @@ class LegacyAb extends BaseAb {
         peers.clear();
       } else if (resp.body.isNotEmpty) {
         Map<String, dynamic> json =
-            _jsonDecodeRespMap(utf8.decode(resp.bodyBytes), resp.statusCode);
+            _jsonDecodeRespMap(decode_http_response(resp), resp.statusCode);
         if (json.containsKey('error')) {
           throw json['error'];
         } else if (json.containsKey('data')) {
@@ -932,7 +1005,7 @@ class LegacyAb extends BaseAb {
         ret = true;
       } else {
         Map<String, dynamic> json =
-            _jsonDecodeRespMap(utf8.decode(resp.bodyBytes), resp.statusCode);
+            _jsonDecodeRespMap(decode_http_response(resp), resp.statusCode);
         if (json.containsKey('error')) {
           throw json['error'];
         } else if (resp.statusCode == 200) {
@@ -1308,7 +1381,7 @@ class Ab extends BaseAb {
         final resp = await http.post(uri, headers: headers);
         statusCode = resp.statusCode;
         Map<String, dynamic> json =
-            _jsonDecodeRespMap(utf8.decode(resp.bodyBytes), resp.statusCode);
+            _jsonDecodeRespMap(decode_http_response(resp), resp.statusCode);
         if (json.containsKey('error')) {
           throw json['error'];
         }
@@ -1365,7 +1438,7 @@ class Ab extends BaseAb {
       final resp = await http.post(uri, headers: headers);
       statusCode = resp.statusCode;
       List<dynamic> json =
-          _jsonDecodeRespList(utf8.decode(resp.bodyBytes), resp.statusCode);
+          _jsonDecodeRespList(decode_http_response(resp), resp.statusCode);
       if (resp.statusCode != 200) {
         throw 'HTTP ${resp.statusCode}';
       }

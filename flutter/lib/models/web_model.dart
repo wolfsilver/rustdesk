@@ -1,15 +1,19 @@
 // ignore_for_file: avoid_web_libraries_in_flutter
 
 import 'dart:convert';
+import 'dart:js_interop';
 import 'dart:typed_data';
 import 'dart:js';
 import 'dart:html';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_hbb/common/widgets/login.dart';
+import 'package:flutter_hbb/models/state_model.dart';
 
 import 'package:flutter_hbb/web/bridge.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:uuid/uuid.dart';
 
 final List<StreamSubscription<MouseEvent>> mouseListeners = [];
 final List<StreamSubscription<KeyboardEvent>> keyListeners = [];
@@ -28,7 +32,15 @@ class PlatformFFI {
     context.callMethod('setByName', [name, value]);
   }
 
-  PlatformFFI._();
+  PlatformFFI._() {
+    window.document.addEventListener(
+        'visibilitychange',
+        (event) => {
+              stateGlobal.isWebVisible =
+                  window.document.visibilityState == 'visible'
+            });
+  }
+
   static final PlatformFFI instance = PlatformFFI._();
 
   static get localeName => window.navigator.language;
@@ -39,14 +51,15 @@ class PlatformFFI {
   }
 
   bool registerEventHandler(
-      String eventName, String handlerName, HandleEvent handler) {
+      String eventName, String handlerName, HandleEvent handler,
+      {bool replace = false}) {
     debugPrint('registerEventHandler $eventName $handlerName');
     var handlers = _eventHandlers[eventName];
     if (handlers == null) {
       _eventHandlers[eventName] = {handlerName: handler};
       return true;
     } else {
-      if (handlers.containsKey(handlerName)) {
+      if (!replace && handlers.containsKey(handlerName)) {
         return false;
       } else {
         handlers[handlerName] = handler;
@@ -98,6 +111,21 @@ class PlatformFFI {
           sessionId: sessionId, display: display, ptr: ptr);
 
   Future<void> init(String appType) async {
+    Completer completer = Completer();
+    context["onInitFinished"] = () {
+      completer.complete();
+    };
+    context['dialog'] = (type, title, text) {
+      final uuid = Uuid();
+      msgBox(SessionID(uuid.v4()), type, title, text, '', gFFI.dialogManager);
+    };
+    context['loginDialog'] = () {
+      loginDialog();
+    };
+    context['closeConnection'] = () {
+      gFFI.dialogManager.dismissAll();
+      closeConnection();
+    };
     context.callMethod('init');
     version = getByName('version');
     window.onContextMenu.listen((event) {
@@ -112,6 +140,7 @@ class PlatformFFI {
         print('json.decode fail(): $e');
       }
     };
+    return completer.future;
   }
 
   void setEventCallback(void Function(Map<String, dynamic>) fun) {
@@ -157,4 +186,10 @@ class PlatformFFI {
 
   // just for compilation
   void syncAndroidServiceAppDirConfigPath() {}
+
+  void setFullscreenCallback(void Function(bool) fun) {
+    context["onFullscreenChanged"] = (bool v) {
+      fun(v);
+    };
+  }
 }

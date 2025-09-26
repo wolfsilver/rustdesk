@@ -24,6 +24,7 @@ use super::capturable::{Capturable, Recorder};
 use super::remote_desktop_portal::OrgFreedesktopPortalRemoteDesktop as remote_desktop_portal;
 use super::request_portal::OrgFreedesktopPortalRequestResponse;
 use super::screencast_portal::OrgFreedesktopPortalScreenCast as screencast_portal;
+use hbb_common::platform::linux::CMD_SH;
 use lazy_static::lazy_static;
 
 lazy_static! {
@@ -660,7 +661,9 @@ fn on_create_session_response(
                 Variant(Box::new("u3".to_string())),
             );
             // https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html
-            // args.insert("multiple".into(), Variant(Box::new(true)));
+            if is_server_running() {
+                args.insert("multiple".into(), Variant(Box::new(true)));
+            }
             args.insert("types".into(), Variant(Box::new(1u32))); //| 2u32)));
 
             let path = portal.select_sources(ses.clone(), args)?;
@@ -724,7 +727,9 @@ fn on_select_devices_response(
             Variant(Box::new("u3".to_string())),
         );
         // https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html
-        // args.insert("multiple".into(), Variant(Box::new(true)));
+        if is_server_running() {
+            args.insert("multiple".into(), Variant(Box::new(true)));
+        }
         args.insert("types".into(), Variant(Box::new(1u32))); //| 2u32)));
 
         let session = session.clone();
@@ -880,7 +885,7 @@ pub fn get_capturables() -> Result<Vec<PipeWireCapturable>, Box<dyn Error>> {
 // `remote_desktop_portal` does not support restore_token and persist_mode.
 fn is_server_running() -> bool {
     let app_name = config::APP_NAME.read().unwrap().clone().to_lowercase();
-    let output = match Command::new("sh")
+    let output = match Command::new(CMD_SH.as_str())
         .arg("-c")
         .arg(&format!("ps aux | grep {}", app_name))
         .output()

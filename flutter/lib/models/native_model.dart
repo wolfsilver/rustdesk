@@ -48,20 +48,26 @@ class PlatformFFI {
 
   static get isMain => instance._appType == kAppTypeMain;
 
+  static String getByName(String name, [String arg = '']) {
+    return '';
+  }
+
+  static void setByName(String name, [String value = '']) {}
+
   static Future<String> getVersion() async {
     PackageInfo packageInfo = await PackageInfo.fromPlatform();
     return packageInfo.version;
   }
 
   bool registerEventHandler(
-      String eventName, String handlerName, HandleEvent handler) {
+      String eventName, String handlerName, HandleEvent handler, {bool replace = false}) {
     debugPrint('registerEventHandler $eventName $handlerName');
     var handlers = _eventHandlers[eventName];
     if (handlers == null) {
       _eventHandlers[eventName] = {handlerName: handler};
       return true;
     } else {
-      if (handlers.containsKey(handlerName)) {
+      if (!replace && handlers.containsKey(handlerName)) {
         return false;
       } else {
         handlers[handlerName] = handler;
@@ -150,7 +156,10 @@ class PlatformFFI {
           // only support for android
           _homeDir = (await ExternalPath.getExternalStorageDirectories())[0];
         } else if (isIOS) {
-          _homeDir = _ffiBind.mainGetDataDirIos();
+          // The previous code was `_homeDir = (await getDownloadsDirectory())?.path ?? '';`,
+          // which provided the `downloads` path in the sandbox.
+          // It is unclear why we now use the `data` directory in the sandbox instead.
+          _homeDir = _ffiBind.mainGetDataDirIos(appDir: _dir);
         } else {
           // no need to set home dir
         }
@@ -276,4 +285,6 @@ class PlatformFFI {
   void syncAndroidServiceAppDirConfigPath() {
     invokeMethod(AndroidChannel.kSyncAppDirConfigPath, _dir);
   }
+
+  void setFullscreenCallback(void Function(bool) fun) {}
 }

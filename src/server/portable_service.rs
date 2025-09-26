@@ -15,7 +15,7 @@ use shared_memory::*;
 use std::{
     mem::size_of,
     ops::{Deref, DerefMut},
-    path::PathBuf,
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -92,7 +92,7 @@ impl SharedMemory {
             }
         };
         log::info!("Create shared memory, size: {}, flink: {}", size, flink);
-        set_path_permission(&PathBuf::from(flink), "F").ok();
+        set_path_permission(Path::new(&flink), "F").ok();
         Ok(SharedMemory { inner: shmem })
     }
 
@@ -476,9 +476,9 @@ pub mod server {
                                             break;
                                         }
                                     }
-                                    Mouse((v, conn)) => {
+                                    Mouse((v, conn, username, argb, simulate, show_cursor)) => {
                                         if let Ok(evt) = MouseEvent::parse_from_bytes(&v) {
-                                            crate::input_service::handle_mouse_(&evt, conn);
+                                            crate::input_service::handle_mouse_(&evt, conn, username, argb, simulate, show_cursor);
                                         }
                                     }
                                     Pointer((v, conn)) => {
@@ -586,8 +586,8 @@ pub mod client {
                 let mut exe = std::env::current_exe()?.to_string_lossy().to_string();
                 #[cfg(feature = "flutter")]
                 {
-                    if let Some(dir) = PathBuf::from(&exe).parent() {
-                        if set_path_permission(&PathBuf::from(dir), "RX").is_err() {
+                    if let Some(dir) = Path::new(&exe).parent() {
+                        if set_path_permission(Path::new(dir), "RX").is_err() {
                             *SHMEM.lock().unwrap() = None;
                             bail!("Failed to set permission of {:?}", dir);
                         }
@@ -717,7 +717,7 @@ pub mod client {
                     }
                     let frame_ptr = base.add(ADDR_CAPTURE_FRAME);
                     let data = slice::from_raw_parts(frame_ptr, (*frame_info).length);
-                    Ok(Frame::PixelBuffer(PixelBuffer::new(
+                    Ok(Frame::PixelBuffer(PixelBuffer::with_BGRA(
                         data,
                         self.width,
                         self.height,
@@ -808,8 +808,13 @@ pub mod client {
                                                             },
                                                             ConnCount(None) => {
                                                                 if !quick_support {
-                                                                    let cnt = crate::server::CONN_COUNT.lock().unwrap().clone();
-                                                                    stream.send(&Data::DataPortableService(ConnCount(Some(cnt)))).await.ok();
+                                                                    let remote_count = crate::server::AUTHED_CONNS
+                                                                        .lock()
+                                                                        .unwrap()
+                                                                        .iter()
+                                                                        .filter(|c| c.conn_type == crate::server::AuthConnType::Remote)
+                                                                        .count();
+                                                                    stream.send(&Data::DataPortableService(ConnCount(Some(remote_count)))).await.ok();
                                                                 }
                                                             },
                                                             WillClose => {
@@ -870,11 +875,23 @@ pub mod client {
         }
     }
 
-    fn handle_mouse_(evt: &MouseEvent, conn: i32) -> ResultType<()> {
+    fn handle_mouse_(
+        evt: &MouseEvent,
+        conn: i32,
+        username: String,
+        argb: u32,
+        simulate: bool,
+        show_cursor: bool,
+    ) -> ResultType<()> {
         let mut v = vec![];
         evt.write_to_vec(&mut v)?;
         ipc_send(Data::DataPortableService(DataPortableService::Mouse((
-            v, conn,
+            v,
+            conn,
+            username,
+            argb,
+            simulate,
+            show_cursor,
         ))))
     }
 
@@ -922,12 +939,19 @@ pub mod client {
         }
     }
 
-    pub fn handle_mouse(evt: &MouseEvent, conn: i32) {
+    pub fn handle_mouse(
+        evt: &MouseEvent,
+        conn: i32,
+        username: String,
+        argb: u32,
+        simulate: bool,
+        show_cursor: bool,
+    ) {
         if RUNNING.lock().unwrap().clone() {
             crate::input_service::update_latest_input_cursor_time(conn);
-            handle_mouse_(evt, conn).ok();
+            handle_mouse_(evt, conn, username, argb, simulate, show_cursor).ok();
         } else {
-            crate::input_service::handle_mouse_(evt, conn);
+            crate::input_service::handle_mouse_(evt, conn, username, argb, simulate, show_cursor);
         }
     }
 

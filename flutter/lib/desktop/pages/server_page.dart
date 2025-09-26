@@ -88,12 +88,14 @@ class _DesktopServerPageState extends State<DesktopServerPage>
           );
           return isLinux
               ? buildVirtualWindowFrame(context, body)
-              : Container(
-                  decoration: BoxDecoration(
-                      border:
-                          Border.all(color: MyTheme.color(context).border!)),
-                  child: body,
-                );
+              : workaroundWindowBorder(
+                  context,
+                  Container(
+                    decoration: BoxDecoration(
+                        border:
+                            Border.all(color: MyTheme.color(context).border!)),
+                    child: body,
+                  ));
         },
       ),
     );
@@ -110,7 +112,8 @@ class ConnectionManager extends StatefulWidget {
 
 class ConnectionManagerState extends State<ConnectionManager>
     with WidgetsBindingObserver {
-  final RxBool _block = false.obs;
+  final RxBool _controlPageBlock = false.obs;
+  final RxBool _sidePageBlock = false.obs;
 
   ConnectionManagerState() {
     gFFI.serverModel.tabController.onSelected = (client_id_str) {
@@ -139,7 +142,8 @@ class ConnectionManagerState extends State<ConnectionManager>
     super.didChangeAppLifecycleState(state);
     if (state == AppLifecycleState.resumed) {
       if (!allowRemoteCMModification()) {
-        shouldBeBlocked(_block, null);
+        shouldBeBlocked(_controlPageBlock, null);
+        shouldBeBlocked(_sidePageBlock, null);
       }
     }
   }
@@ -192,7 +196,6 @@ class ConnectionManagerState extends State<ConnectionManager>
               selectedBorderColor: MyTheme.accent,
               maxLabelWidth: 100,
               tail: null, //buildScrollJumper(),
-              blockTab: allowRemoteCMModification() ? null : _block,
               tabBuilder: (key, icon, label, themeConf) {
                 final client = serverModel.clients
                     .firstWhereOrNull((client) => client.id.toString() == key);
@@ -237,13 +240,20 @@ class ConnectionManagerState extends State<ConnectionManager>
                                     ? buildSidePage()
                                     : buildRemoteBlock(
                                         child: buildSidePage(),
-                                        block: _block,
+                                        block: _sidePageBlock,
                                         mask: true),
                               )),
                     SizedBox(
                         width: realClosedWidth,
-                        child:
-                            SizedBox(width: realClosedWidth, child: pageView)),
+                        child: SizedBox(
+                            width: realClosedWidth,
+                            child: allowRemoteCMModification()
+                                ? pageView
+                                : buildRemoteBlock(
+                                    child: _buildKeyEventBlock(pageView),
+                                    block: _controlPageBlock,
+                                    mask: false,
+                                  ))),
                   ]);
                   return Container(
                     color: Theme.of(context).scaffoldBackgroundColor,
@@ -266,6 +276,10 @@ class ConnectionManagerState extends State<ConnectionManager>
     } else {
       return ChatPage(type: ChatPageType.desktopCM);
     }
+  }
+
+  Widget _buildKeyEventBlock(Widget child) {
+    return ExcludeFocus(child: child, excluding: true);
   }
 
   Widget buildTitleBar() {
@@ -339,7 +353,10 @@ Widget buildConnectionCard(Client client) {
       key: ValueKey(client.id),
       children: [
         _CmHeader(client: client),
-        client.type_() != ClientType.remote || client.disconnected
+        client.type_() == ClientType.file ||
+                client.type_() == ClientType.portForward ||
+                client.type_() == ClientType.terminal ||
+                client.disconnected
             ? Offstage()
             : _PrivilegeBoard(client: client),
         Expanded(
@@ -483,7 +500,36 @@ class _CmHeaderState extends State<_CmHeader>
                     "(${client.peerId})",
                     style: TextStyle(color: Colors.white, fontSize: 14),
                   ),
-                ).marginOnly(bottom: 10.0),
+                ),
+                if (client.type_() == ClientType.terminal)
+                  FittedBox(
+                    child: Text(
+                      translate("Terminal"),
+                      style: TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                  ),
+                if (client.type_() == ClientType.file)
+                  FittedBox(
+                    child: Text(
+                      translate("File Transfer"),
+                      style: TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                  ),
+                if (client.type_() == ClientType.camera)
+                  FittedBox(
+                    child: Text(
+                      translate("View Camera"),
+                      style: TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                  ),
+                if (client.portForward.isNotEmpty)
+                  FittedBox(
+                    child: Text(
+                      "Port Forward: ${client.portForward}",
+                      style: TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                  ),
+                SizedBox(height: 10.0),
                 FittedBox(
                     child: Row(
                   children: [
@@ -512,7 +558,8 @@ class _CmHeaderState extends State<_CmHeader>
           Offstage(
             offstage: !client.authorized ||
                 (client.type_() != ClientType.remote &&
-                    client.type_() != ClientType.file),
+                    client.type_() != ClientType.file &&
+                    client.type_() != ClientType.camera),
             child: IconButton(
               onPressed: () => checkClickTime(client.id, () {
                 if (client.type_() == ClientType.file) {
@@ -613,96 +660,139 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
               padding: EdgeInsets.symmetric(horizontal: spacing),
               mainAxisSpacing: spacing,
               crossAxisSpacing: spacing,
-              children: [
-                buildPermissionIcon(
-                  client.keyboard,
-                  Icons.keyboard,
-                  (enabled) {
-                    bind.cmSwitchPermission(
-                        connId: client.id, name: "keyboard", enabled: enabled);
-                    setState(() {
-                      client.keyboard = enabled;
-                    });
-                  },
-                  translate('Enable keyboard/mouse'),
-                ),
-                buildPermissionIcon(
-                  client.clipboard,
-                  Icons.assignment_rounded,
-                  (enabled) {
-                    bind.cmSwitchPermission(
-                        connId: client.id, name: "clipboard", enabled: enabled);
-                    setState(() {
-                      client.clipboard = enabled;
-                    });
-                  },
-                  translate('Enable clipboard'),
-                ),
-                buildPermissionIcon(
-                  client.audio,
-                  Icons.volume_up_rounded,
-                  (enabled) {
-                    bind.cmSwitchPermission(
-                        connId: client.id, name: "audio", enabled: enabled);
-                    setState(() {
-                      client.audio = enabled;
-                    });
-                  },
-                  translate('Enable audio'),
-                ),
-                buildPermissionIcon(
-                  client.file,
-                  Icons.upload_file_rounded,
-                  (enabled) {
-                    bind.cmSwitchPermission(
-                        connId: client.id, name: "file", enabled: enabled);
-                    setState(() {
-                      client.file = enabled;
-                    });
-                  },
-                  translate('Enable file copy and paste'),
-                ),
-                buildPermissionIcon(
-                  client.restart,
-                  Icons.restart_alt_rounded,
-                  (enabled) {
-                    bind.cmSwitchPermission(
-                        connId: client.id, name: "restart", enabled: enabled);
-                    setState(() {
-                      client.restart = enabled;
-                    });
-                  },
-                  translate('Enable remote restart'),
-                ),
-                buildPermissionIcon(
-                  client.recording,
-                  Icons.videocam_rounded,
-                  (enabled) {
-                    bind.cmSwitchPermission(
-                        connId: client.id, name: "recording", enabled: enabled);
-                    setState(() {
-                      client.recording = enabled;
-                    });
-                  },
-                  translate('Enable recording session'),
-                ),
-                // only windows support block input
-                if (isWindows)
-                  buildPermissionIcon(
-                    client.blockInput,
-                    Icons.block,
-                    (enabled) {
-                      bind.cmSwitchPermission(
-                          connId: client.id,
-                          name: "block_input",
-                          enabled: enabled);
-                      setState(() {
-                        client.blockInput = enabled;
-                      });
-                    },
-                    translate('Enable blocking user input'),
-                  )
-              ],
+              children: client.type_() == ClientType.camera
+                  ? [
+                      buildPermissionIcon(
+                        client.audio,
+                        Icons.volume_up_rounded,
+                        (enabled) {
+                          bind.cmSwitchPermission(
+                              connId: client.id,
+                              name: "audio",
+                              enabled: enabled);
+                          setState(() {
+                            client.audio = enabled;
+                          });
+                        },
+                        translate('Enable audio'),
+                      ),
+                      buildPermissionIcon(
+                        client.recording,
+                        Icons.videocam_rounded,
+                        (enabled) {
+                          bind.cmSwitchPermission(
+                              connId: client.id,
+                              name: "recording",
+                              enabled: enabled);
+                          setState(() {
+                            client.recording = enabled;
+                          });
+                        },
+                        translate('Enable recording session'),
+                      ),
+                    ]
+                  : [
+                      buildPermissionIcon(
+                        client.keyboard,
+                        Icons.keyboard,
+                        (enabled) {
+                          bind.cmSwitchPermission(
+                              connId: client.id,
+                              name: "keyboard",
+                              enabled: enabled);
+                          setState(() {
+                            client.keyboard = enabled;
+                          });
+                        },
+                        translate('Enable keyboard/mouse'),
+                      ),
+                      buildPermissionIcon(
+                        client.clipboard,
+                        Icons.assignment_rounded,
+                        (enabled) {
+                          bind.cmSwitchPermission(
+                              connId: client.id,
+                              name: "clipboard",
+                              enabled: enabled);
+                          setState(() {
+                            client.clipboard = enabled;
+                          });
+                        },
+                        translate('Enable clipboard'),
+                      ),
+                      buildPermissionIcon(
+                        client.audio,
+                        Icons.volume_up_rounded,
+                        (enabled) {
+                          bind.cmSwitchPermission(
+                              connId: client.id,
+                              name: "audio",
+                              enabled: enabled);
+                          setState(() {
+                            client.audio = enabled;
+                          });
+                        },
+                        translate('Enable audio'),
+                      ),
+                      buildPermissionIcon(
+                        client.file,
+                        Icons.upload_file_rounded,
+                        (enabled) {
+                          bind.cmSwitchPermission(
+                              connId: client.id,
+                              name: "file",
+                              enabled: enabled);
+                          setState(() {
+                            client.file = enabled;
+                          });
+                        },
+                        translate('Enable file copy and paste'),
+                      ),
+                      buildPermissionIcon(
+                        client.restart,
+                        Icons.restart_alt_rounded,
+                        (enabled) {
+                          bind.cmSwitchPermission(
+                              connId: client.id,
+                              name: "restart",
+                              enabled: enabled);
+                          setState(() {
+                            client.restart = enabled;
+                          });
+                        },
+                        translate('Enable remote restart'),
+                      ),
+                      buildPermissionIcon(
+                        client.recording,
+                        Icons.videocam_rounded,
+                        (enabled) {
+                          bind.cmSwitchPermission(
+                              connId: client.id,
+                              name: "recording",
+                              enabled: enabled);
+                          setState(() {
+                            client.recording = enabled;
+                          });
+                        },
+                        translate('Enable recording session'),
+                      ),
+                      // only windows support block input
+                      if (isWindows)
+                        buildPermissionIcon(
+                          client.blockInput,
+                          Icons.block,
+                          (enabled) {
+                            bind.cmSwitchPermission(
+                                connId: client.id,
+                                name: "block_input",
+                                enabled: enabled);
+                            setState(() {
+                              client.blockInput = enabled;
+                            });
+                          },
+                          translate('Enable blocking user input'),
+                        )
+                    ],
             ),
           ),
         ],

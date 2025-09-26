@@ -111,11 +111,17 @@ pub struct Enigo {
     double_click_interval: u32,
     last_click_time: Option<std::time::Instant>,
     multiple_click: i64,
+    ignore_flags: bool,
     flags: CGEventFlags,
     char_to_vkey_map: Map<String, Map<char, CGKeyCode>>,
 }
 
 impl Enigo {
+    /// Set if ignore flags when posting events.
+    pub fn set_ignore_flags(&mut self, ignore: bool) {
+        self.ignore_flags = ignore;
+    }
+
     ///
     pub fn reset_flag(&mut self) {
         self.flags = CGEventFlags::CGEventFlagNull;
@@ -135,8 +141,29 @@ impl Enigo {
         self.flags |= flag;
     }
 
-    fn post(&self, event: CGEvent) {
-        event.set_flags(self.flags);
+    // Just check F11 for minimal changes.
+    // Since enigo (legacy mode) is deprecated, it is currently in maintenance only.
+    fn post(&self, event: CGEvent, keycode: Option<u16>) {
+        if keycode == Some(kVK_F11) {
+            // Some key events require the flags to work.
+            // We can't simply set the flag to `CGEventFlags::CGEventFlagNull`.
+            // eg. `F11` requires flags `CGEventFlags::CGEventFlagSecondaryFn | 0x20000000` to work.
+            self.post_event(event, false);
+        } else {
+            // macOS system may use the previous event flag to generate the next event.
+            // Only found this issue when locking the screen.
+            // When we use enigo to lock the screen, the next mouse event will have the flag
+            // `CGEventFlagControl | CGEventFlagCommand | 0x20000000`.
+            // The key event will also have the flag `CGEventFlagControl | CGEventFlagCommand | 0x20000000`.
+            // Therefore, we need to set the flag to `event.set_flags(self.flags)` to avoid this.
+            self.post_event(event, true);
+        }
+    }
+
+    fn post_event(&self, event: CGEvent, force_flags: bool) {
+        if !self.ignore_flags && (force_flags || self.flags != CGEventFlags::CGEventFlagNull) {
+            event.set_flags(self.flags);
+        }
         event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, ENIGO_INPUT_EXTRA_VALUE);
         event.post(CGEventTapLocation::HID);
     }
@@ -164,6 +191,7 @@ impl Default for Enigo {
             double_click_interval,
             multiple_click: 1,
             last_click_time: None,
+            ignore_flags: false,
             flags: CGEventFlags::CGEventFlagNull,
             char_to_vkey_map: Default::default(),
         }
@@ -195,7 +223,7 @@ impl MouseControllable for Enigo {
             if let Ok(event) =
                 CGEvent::new_mouse_event(src.clone(), event_type, dest, CGMouseButton::Left)
             {
-                self.post(event);
+                self.post(event, None);
             }
         }
     }
@@ -260,7 +288,7 @@ impl MouseControllable for Enigo {
                 if let Some(v) = btn_value {
                     event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, v);
                 }
-                self.post(event);
+                self.post(event, None);
             }
         }
         Ok(())
@@ -299,7 +327,7 @@ impl MouseControllable for Enigo {
                 if let Some(v) = btn_value {
                     event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, v);
                 }
-                self.post(event);
+                self.post(event, None);
             }
         }
     }
@@ -385,7 +413,7 @@ impl KeyboardControllable for Enigo {
             if let Some(src) = self.event_source.as_ref() {
                 if let Ok(event) = CGEvent::new_keyboard_event(src.clone(), 0, true) {
                     event.set_string(cluster);
-                    self.post(event);
+                    self.post(event, None);
                 }
             }
         }
@@ -399,11 +427,11 @@ impl KeyboardControllable for Enigo {
 
         if let Some(src) = self.event_source.as_ref() {
             if let Ok(event) = CGEvent::new_keyboard_event(src.clone(), keycode, true) {
-                self.post(event);
+                self.post(event, Some(keycode));
             }
 
             if let Ok(event) = CGEvent::new_keyboard_event(src.clone(), keycode, false) {
-                self.post(event);
+                self.post(event, Some(keycode));
             }
         }
     }
@@ -415,18 +443,17 @@ impl KeyboardControllable for Enigo {
         }
         if let Some(src) = self.event_source.as_ref() {
             if let Ok(event) = CGEvent::new_keyboard_event(src.clone(), code, true) {
-                self.post(event);
+                self.post(event, Some(code));
             }
         }
         Ok(())
     }
 
     fn key_up(&mut self, key: Key) {
+        let code = self.key_to_keycode(key);
         if let Some(src) = self.event_source.as_ref() {
-            if let Ok(event) =
-                CGEvent::new_keyboard_event(src.clone(), self.key_to_keycode(key), false)
-            {
-                self.post(event);
+            if let Ok(event) = CGEvent::new_keyboard_event(src.clone(), code, false) {
+                self.post(event, Some(code));
             }
         }
     }

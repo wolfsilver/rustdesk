@@ -5,7 +5,7 @@ import 'package:dynamic_layouts/dynamic_layouts.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/consts.dart';
-import 'package:flutter_hbb/desktop/widgets/scroll_wrapper.dart';
+import 'package:flutter_hbb/models/ab_model.dart';
 import 'package:flutter_hbb/models/peer_tab_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:get/get.dart';
@@ -25,13 +25,13 @@ class PeerSortType {
   static const String remoteId = 'Remote ID';
   static const String remoteHost = 'Remote Host';
   static const String username = 'Username';
-  // static const String status = 'Status';
+  static const String status = 'Status';
 
   static List<String> values = [
     PeerSortType.remoteId,
     PeerSortType.remoteHost,
     PeerSortType.username,
-    // PeerSortType.status
+    PeerSortType.status
   ];
 }
 
@@ -270,33 +270,24 @@ class _PeersViewState extends State<_PeersView>
                     },
                   )
                 : peerCardUiType.value == PeerUiType.list
-                    ? DesktopScrollWrapper(
-                        scrollController: _scrollController,
-                        child: ListView.builder(
-                            controller: _scrollController,
-                            physics: DraggableNeverScrollableScrollPhysics(),
-                            itemCount: peers.length,
-                            itemBuilder: (BuildContext context, int index) {
-                              return buildOnePeer(peers[index], false)
-                                  .marginOnly(
-                                      right: space,
-                                      top: index == 0 ? 0 : space / 2,
-                                      bottom: space / 2);
-                            }),
+                    ? ListView.builder(
+                        controller: _scrollController,
+                        itemCount: peers.length,
+                        itemBuilder: (BuildContext context, int index) {
+                          return buildOnePeer(peers[index], false).marginOnly(
+                              right: space,
+                              top: index == 0 ? 0 : space / 2,
+                              bottom: space / 2);
+                        },
                       )
-                    : DesktopScrollWrapper(
-                        scrollController: _scrollController,
-                        child: DynamicGridView.builder(
-                            controller: _scrollController,
-                            physics: DraggableNeverScrollableScrollPhysics(),
-                            gridDelegate: SliverGridDelegateWithWrapping(
-                                mainAxisSpacing: space / 2,
-                                crossAxisSpacing: space),
-                            itemCount: peers.length,
-                            itemBuilder: (BuildContext context, int index) {
-                              return buildOnePeer(peers[index], false);
-                            }),
-                      ));
+                    : DynamicGridView.builder(
+                        gridDelegate: SliverGridDelegateWithWrapping(
+                            mainAxisSpacing: space / 2,
+                            crossAxisSpacing: space),
+                        itemCount: peers.length,
+                        itemBuilder: (BuildContext context, int index) {
+                          return buildOnePeer(peers[index], false);
+                        }));
 
             if (updateEvent == UpdateEvent.load) {
               _curPeers.clear();
@@ -332,7 +323,12 @@ class _PeersViewState extends State<_PeersView>
             _queryOnlines(false);
           }
         } else {
-          if (_isActive && (_queryCount < _maxQueryCount || !p)) {
+          final skipIfIsWeb =
+              isWeb && !(stateGlobal.isWebVisible && stateGlobal.isInMainPage);
+          final skipIfMobile =
+              (isAndroid || isIOS) && !stateGlobal.isInMainPage;
+          final skipIfNotActive = skipIfIsWeb || skipIfMobile || !_isActive;
+          if (!skipIfNotActive && (_queryCount < _maxQueryCount || !p)) {
             if (now.difference(_lastQueryTime) >= _queryInterval) {
               if (_curPeers.isNotEmpty) {
                 bind.queryOnlines(ids: _curPeers.toList(growable: false));
@@ -388,9 +384,9 @@ class _PeersViewState extends State<_PeersView>
           peers.sort((p1, p2) =>
               p1.username.toLowerCase().compareTo(p2.username.toLowerCase()));
           break;
-        // case PeerSortType.status:
-        // peers.sort((p1, p2) => p1.online ? -1 : 1);
-        // break;
+        case PeerSortType.status:
+          peers.sort((p1, p2) => p1.online ? -1 : 1);
+          break;
       }
     }
 
@@ -505,6 +501,7 @@ class DiscoveredPeersView extends BasePeersView {
   Widget build(BuildContext context) {
     final widget = super.build(context);
     bind.mainLoadLanPeers();
+    bind.mainDiscover();
     return widget;
   }
 }
@@ -527,15 +524,22 @@ class AddressBookPeersView extends BasePeersView {
     if (selectedTags.isEmpty) {
       return true;
     }
+    // The result of a no-tag union with normal tags, still allows normal tags to perform union or intersection operations.
+    final selectedNormalTags =
+        selectedTags.where((tag) => tag != kUntagged).toList();
+    if (selectedTags.contains(kUntagged)) {
+      if (idents.isEmpty) return true;
+      if (selectedNormalTags.isEmpty) return false;
+    }
     if (gFFI.abModel.filterByIntersection.value) {
-      for (final tag in selectedTags) {
+      for (final tag in selectedNormalTags) {
         if (!idents.contains(tag)) {
           return false;
         }
       }
       return true;
     } else {
-      for (final tag in selectedTags) {
+      for (final tag in selectedNormalTags) {
         if (idents.contains(tag)) {
           return true;
         }
@@ -559,14 +563,26 @@ class MyGroupPeerView extends BasePeersView {
         );
 
   static bool filter(Peer peer) {
-    if (gFFI.groupModel.searchUserText.isNotEmpty) {
-      if (!peer.loginName.contains(gFFI.groupModel.searchUserText)) {
+    final model = gFFI.groupModel;
+    if (model.searchAccessibleItemNameText.isNotEmpty) {
+      final text = model.searchAccessibleItemNameText.value;
+      final searchPeersOfUser = peer.loginName.contains(text) &&
+          model.users.any((user) => user.name == peer.loginName);
+      final searchPeersOfDeviceGroup = peer.device_group_name.contains(text) &&
+          model.deviceGroups.any((g) => g.name == peer.device_group_name);
+      if (!searchPeersOfUser && !searchPeersOfDeviceGroup) {
         return false;
       }
     }
-    if (gFFI.groupModel.selectedUser.isNotEmpty) {
-      if (gFFI.groupModel.selectedUser.value != peer.loginName) {
-        return false;
+    if (model.selectedAccessibleItemName.isNotEmpty) {
+      if (model.isSelectedDeviceGroup.value) {
+        if (model.selectedAccessibleItemName.value != peer.device_group_name) {
+          return false;
+        }
+      } else {
+        if (model.selectedAccessibleItemName.value != peer.loginName) {
+          return false;
+        }
       }
     }
     return true;

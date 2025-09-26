@@ -1,16 +1,16 @@
-#[cfg(target_os = "windows")]
-use crate::ipc::ClipboardNonFile;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::ipc::Connection;
 #[cfg(not(any(target_os = "ios")))]
 use crate::ipc::{self, Data};
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "windows")]
+use crate::{clipboard::ClipboardSide, ipc::ClipboardNonFile};
+#[cfg(target_os = "windows")]
 use clipboard::ContextSend;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hbb_common::tokio::sync::mpsc::unbounded_channel;
 use hbb_common::{
     allow_err,
-    config::{keys::*, option2bool, Config},
+    config::Config,
     fs::is_write_need_confirmation,
     fs::{self, get_string, new_send_confirm, DigestCheckResult},
     log,
@@ -22,12 +22,16 @@ use hbb_common::{
         task::spawn_blocking,
     },
 };
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-use hbb_common::{tokio::sync::Mutex as TokioMutex, ResultType};
+#[cfg(target_os = "windows")]
+use hbb_common::{
+    config::{keys::*, option2bool},
+    tokio::sync::Mutex as TokioMutex,
+    ResultType,
+};
 use serde_derive::Serialize;
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 use std::iter::FromIterator;
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "windows")]
 use std::sync::Arc;
 use std::{
     collections::HashMap,
@@ -44,6 +48,8 @@ pub struct Client {
     pub authorized: bool,
     pub disconnected: bool,
     pub is_file_transfer: bool,
+    pub is_view_camera: bool,
+    pub is_terminal: bool,
     pub port_forward: String,
     pub name: String,
     pub peer_id: String,
@@ -71,9 +77,9 @@ struct IpcTaskRunner<T: InvokeUiCM> {
     close: bool,
     running: bool,
     conn_id: i32,
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     file_transfer_enabled: bool,
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     file_transfer_enabled_peer: bool,
 }
 
@@ -125,6 +131,8 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
         &self,
         id: i32,
         is_file_transfer: bool,
+        is_view_camera: bool,
+        is_terminal: bool,
         port_forward: String,
         peer_id: String,
         name: String,
@@ -144,6 +152,8 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             authorized,
             disconnected: false,
             is_file_transfer,
+            is_view_camera,
+            is_terminal,
             port_forward,
             name: name.clone(),
             peer_id: peer_id.clone(),
@@ -169,7 +179,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
     }
 
     #[inline]
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     fn is_authorized(&self, id: i32) -> bool {
         CLIENTS
             .read()
@@ -190,12 +200,9 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
                 .map(|c| c.disconnected = true);
         }
 
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         {
-            let _ = ContextSend::proc(|context| -> ResultType<()> {
-                context.empty_clipboard(id)?;
-                Ok(())
-            });
+            crate::clipboard::try_empty_clipboard_files(ClipboardSide::Host, id);
         }
 
         #[cfg(any(target_os = "android"))]
@@ -203,7 +210,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             .read()
             .unwrap()
             .iter()
-            .filter(|(_k, v)| !v.is_file_transfer)
+            .filter(|(_k, v)| !v.is_file_transfer && !v.is_terminal)
             .next()
             .is_none()
         {
@@ -281,15 +288,6 @@ pub fn close(id: i32) {
 }
 
 #[inline]
-#[cfg(target_os = "android")]
-pub fn notify_input_control(v: bool) {
-    for (_, mut client) in CLIENTS.write().unwrap().iter_mut() {
-        client.keyboard = v;
-        allow_err!(client.tx.send(Data::InputControl(v)));
-    }
-}
-
-#[inline]
 pub fn remove(id: i32) {
     CLIENTS.write().unwrap().remove(&id);
 }
@@ -310,6 +308,17 @@ pub fn switch_permission(id: i32, name: String, enabled: bool) {
     if let Some(client) = CLIENTS.read().unwrap().get(&id) {
         allow_err!(client.tx.send(Data::SwitchPermission { name, enabled }));
     };
+}
+
+#[inline]
+#[cfg(target_os = "android")]
+pub fn switch_permission_all(name: String, enabled: bool) {
+    for (_, client) in CLIENTS.read().unwrap().iter() {
+        allow_err!(client.tx.send(Data::SwitchPermission {
+            name: name.clone(),
+            enabled
+        }));
+    }
 }
 
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
@@ -343,31 +352,40 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
         // for tmp use, without real conn id
         let mut write_jobs: Vec<fs::TransferJob> = Vec::new();
 
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         let is_authorized = self.cm.is_authorized(self.conn_id);
 
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-        let rx_clip1;
+        #[cfg(target_os = "windows")]
+        let rx_clip_holder;
         let mut rx_clip;
         let _tx_clip;
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         if self.conn_id > 0 && is_authorized {
             log::debug!("Clipboard is enabled from client peer: type 1");
-            rx_clip1 = clipboard::get_rx_cliprdr_server(self.conn_id);
-            rx_clip = rx_clip1.lock().await;
+            let conn_id = self.conn_id;
+            rx_clip_holder = (
+                clipboard::get_rx_cliprdr_server(conn_id),
+                Some(crate::SimpleCallOnReturn {
+                    b: true,
+                    f: Box::new(move || {
+                        clipboard::remove_channel_by_conn_id(conn_id);
+                    }),
+                }),
+            );
+            rx_clip = rx_clip_holder.0.lock().await;
         } else {
             log::debug!("Clipboard is enabled from client peer, actually useless: type 2");
             let rx_clip2;
             (_tx_clip, rx_clip2) = unbounded_channel::<clipboard::ClipboardFile>();
-            rx_clip1 = Arc::new(TokioMutex::new(rx_clip2));
-            rx_clip = rx_clip1.lock().await;
+            rx_clip_holder = (Arc::new(TokioMutex::new(rx_clip2)), None);
+            rx_clip = rx_clip_holder.0.lock().await;
         }
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+        #[cfg(not(target_os = "windows"))]
         {
             (_tx_clip, rx_clip) = unbounded_channel::<i32>();
         }
 
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        #[cfg(target_os = "windows")]
         {
             if ContextSend::is_enabled() {
                 log::debug!("Clipboard is enabled");
@@ -391,11 +409,11 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                         }
                         Ok(Some(data)) => {
                             match data {
-                                Data::Login{id, is_file_transfer, port_forward, peer_id, name, authorized, keyboard, clipboard, audio, file, file_transfer_enabled: _file_transfer_enabled, restart, recording, block_input, from_switch} => {
+                                Data::Login{id, is_file_transfer, is_view_camera, is_terminal, port_forward, peer_id, name, authorized, keyboard, clipboard, audio, file, file_transfer_enabled: _file_transfer_enabled, restart, recording, block_input, from_switch} => {
                                     log::debug!("conn_id: {}", id);
-                                    self.cm.add_connection(id, is_file_transfer, port_forward, peer_id, name, authorized, keyboard, clipboard, audio, file, restart, recording, block_input, from_switch, self.tx.clone());
+                                    self.cm.add_connection(id, is_file_transfer, is_view_camera, is_terminal, port_forward, peer_id, name, authorized, keyboard, clipboard, audio, file, restart, recording, block_input, from_switch, self.tx.clone());
                                     self.conn_id = id;
-                                    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+                                    #[cfg(target_os = "windows")]
                                     {
                                         self.file_transfer_enabled = _file_transfer_enabled;
                                     }
@@ -436,34 +454,31 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 Data::FileTransferLog((action, log)) => {
                                     self.cm.ui_handler.file_transfer_log(&action, &log);
                                 }
-                                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                                #[cfg(target_os = "windows")]
                                 Data::ClipboardFile(_clip) => {
-                                    #[cfg(any(target_os = "windows", target_os="linux", target_os = "macos"))]
-                                    {
-                                        let is_stopping_allowed = _clip.is_beginning_message();
-                                        let is_clipboard_enabled = ContextSend::is_enabled();
-                                        let file_transfer_enabled = self.file_transfer_enabled;
-                                        let stop = !is_stopping_allowed && !(is_clipboard_enabled && file_transfer_enabled);
-                                        log::debug!(
-                                            "Process clipboard message from client peer, stop: {}, is_stopping_allowed: {}, is_clipboard_enabled: {}, file_transfer_enabled: {}",
-                                            stop, is_stopping_allowed, is_clipboard_enabled, file_transfer_enabled);
-                                        if stop {
-                                            ContextSend::set_is_stopped();
-                                        } else {
-                                            if !is_authorized {
-                                                log::debug!("Clipboard message from client peer, but not authorized");
-                                                continue;
-                                            }
-                                            let conn_id = self.conn_id;
-                                            let _ = ContextSend::proc(|context| -> ResultType<()> {
-                                                context.server_clip_file(conn_id, _clip)
-                                                    .map_err(|e| e.into())
-                                            });
+                                    let is_stopping_allowed = _clip.is_beginning_message();
+                                    let is_clipboard_enabled = ContextSend::is_enabled();
+                                    let file_transfer_enabled = self.file_transfer_enabled;
+                                    let stop = !is_stopping_allowed && !(is_clipboard_enabled && file_transfer_enabled);
+                                    log::debug!(
+                                        "Process clipboard message from client peer, stop: {}, is_stopping_allowed: {}, is_clipboard_enabled: {}, file_transfer_enabled: {}",
+                                        stop, is_stopping_allowed, is_clipboard_enabled, file_transfer_enabled);
+                                    if stop {
+                                        ContextSend::set_is_stopped();
+                                    } else {
+                                        if !is_authorized {
+                                            log::debug!("Clipboard message from client peer, but not authorized");
+                                            continue;
                                         }
+                                        let conn_id = self.conn_id;
+                                        let _ = ContextSend::proc(|context| -> ResultType<()> {
+                                            context.server_clip_file(conn_id, _clip)
+                                                .map_err(|e| e.into())
+                                        });
                                     }
                                 }
                                 Data::ClipboardFileEnabled(_enabled) => {
-                                    #[cfg(any(target_os= "windows",target_os ="linux", target_os = "macos"))]
+                                    #[cfg(target_os = "windows")]
                                     {
                                         self.file_transfer_enabled_peer = _enabled;
                                     }
@@ -512,6 +527,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                                     width: c.width,
                                                     height: c.height,
                                                     format: c.format.value(),
+                                                    special_name: c.special_name,
                                                 });
                                             }
                                             allow_err!(self.stream.send(&Data::ClipboardNonFile(Some(("".to_owned(), main_data)))).await);
@@ -540,7 +556,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                     }
                     match &data {
                         Data::SwitchPermission{name: _name, enabled: _enabled} => {
-                            #[cfg(any(target_os="linux", target_os="windows", target_os = "macos"))]
+                            #[cfg(target_os = "windows")]
                             if _name == "file" {
                                 self.file_transfer_enabled = *_enabled;
                             }
@@ -555,7 +571,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                 },
                 clip_file = rx_clip.recv() => match clip_file {
                     Some(_clip) => {
-                        #[cfg(any(target_os = "windows", target_os ="linux", target_os = "macos"))]
+                        #[cfg(target_os = "windows")]
                         {
                             let is_stopping_allowed = _clip.is_stopping_allowed();
                             let is_clipboard_enabled = ContextSend::is_enabled();
@@ -599,9 +615,9 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
             close: true,
             running: true,
             conn_id: 0,
-            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            #[cfg(target_os = "windows")]
             file_transfer_enabled: false,
-            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            #[cfg(target_os = "windows")]
             file_transfer_enabled_peer: false,
         };
 
@@ -620,13 +636,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tokio::main(flavor = "current_thread")]
 pub async fn start_ipc<T: InvokeUiCM>(cm: ConnectionManager<T>) {
-    #[cfg(any(
-        target_os = "windows",
-        all(
-            any(target_os = "linux", target_os = "macos"),
-            feature = "unix-file-copy-paste"
-        ),
-    ))]
+    #[cfg(target_os = "windows")]
     ContextSend::enable(option2bool(
         OPTION_ENABLE_FILE_TRANSFER,
         &Config::get_option(OPTION_ENABLE_FILE_TRANSFER),
@@ -669,6 +679,8 @@ pub async fn start_listen<T: InvokeUiCM>(
             Some(Data::Login {
                 id,
                 is_file_transfer,
+                is_view_camera,
+                is_terminal,
                 port_forward,
                 peer_id,
                 name,
@@ -687,6 +699,8 @@ pub async fn start_listen<T: InvokeUiCM>(
                 cm.add_connection(
                     id,
                     is_file_transfer,
+                    is_view_camera,
+                    is_terminal,
                     port_forward,
                     peer_id,
                     name,
@@ -736,9 +750,17 @@ async fn handle_fs(
     tx: &UnboundedSender<Data>,
     tx_log: Option<&UnboundedSender<String>>,
 ) {
+    use std::path::PathBuf;
+
     use hbb_common::fs::serialize_transfer_job;
 
     match fs {
+        ipc::FS::ReadEmptyDirs {
+            dir,
+            include_hidden,
+        } => {
+            read_empty_dirs(&dir, include_hidden, tx).await;
+        }
         ipc::FS::ReadDir {
             dir,
             include_hidden,
@@ -771,8 +793,9 @@ async fn handle_fs(
             // dummy remote, show_hidden, is_remote
             let mut job = fs::TransferJob::new_write(
                 id,
+                fs::JobType::Generic,
                 "".to_string(),
-                path,
+                fs::DataSource::FilePath(PathBuf::from(&path)),
                 file_num,
                 false,
                 false,
@@ -791,27 +814,24 @@ async fn handle_fs(
             write_jobs.push(job);
         }
         ipc::FS::CancelWrite { id } => {
-            if let Some(job) = fs::get_job(id, write_jobs) {
+            if let Some(job) = fs::remove_job(id, write_jobs) {
                 job.remove_download_file();
                 tx_log.map(|tx: &UnboundedSender<String>| {
-                    tx.send(serialize_transfer_job(job, false, true, ""))
+                    tx.send(serialize_transfer_job(&job, false, true, ""))
                 });
-                fs::remove_job(id, write_jobs);
             }
         }
         ipc::FS::WriteDone { id, file_num } => {
-            if let Some(job) = fs::get_job(id, write_jobs) {
+            if let Some(job) = fs::remove_job(id, write_jobs) {
                 job.modify_time();
                 send_raw(fs::new_done(id, file_num), tx);
-                tx_log.map(|tx| tx.send(serialize_transfer_job(job, true, false, "")));
-                fs::remove_job(id, write_jobs);
+                tx_log.map(|tx| tx.send(serialize_transfer_job(&job, true, false, "")));
             }
         }
         ipc::FS::WriteError { id, file_num, err } => {
-            if let Some(job) = fs::get_job(id, write_jobs) {
-                tx_log.map(|tx| tx.send(serialize_transfer_job(job, false, false, &err)));
+            if let Some(job) = fs::remove_job(id, write_jobs) {
+                tx_log.map(|tx| tx.send(serialize_transfer_job(&job, false, false, &err)));
                 send_raw(fs::new_error(job.id(), err, file_num), tx);
-                fs::remove_job(job.id(), write_jobs);
             }
         }
         ipc::FS::WriteBlock {
@@ -841,6 +861,7 @@ async fn handle_fs(
             file_size,
             last_modified,
             is_upload,
+            is_resume,
         } => {
             if let Some(job) = fs::get_job(id, write_jobs) {
                 let mut req = FileTransferSendConfirmRequest {
@@ -857,34 +878,44 @@ async fn handle_fs(
                     ..Default::default()
                 };
                 if let Some(file) = job.files().get(file_num as usize) {
-                    let path = get_string(&job.join(&file.name));
-                    match is_write_need_confirmation(&path, &digest) {
-                        Ok(digest_result) => {
-                            match digest_result {
-                                DigestCheckResult::IsSame => {
-                                    req.set_skip(true);
-                                    let msg_out = new_send_confirm(req);
-                                    send_raw(msg_out, &tx);
-                                }
-                                DigestCheckResult::NeedConfirm(mut digest) => {
-                                    // upload to server, but server has the same file, request
-                                    digest.is_upload = is_upload;
-                                    let mut msg_out = Message::new();
-                                    let mut fr = FileResponse::new();
-                                    fr.set_digest(digest);
-                                    msg_out.set_file_response(fr);
-                                    send_raw(msg_out, &tx);
-                                }
-                                DigestCheckResult::NoSuchFile => {
-                                    let msg_out = new_send_confirm(req);
-                                    send_raw(msg_out, &tx);
+                    if let fs::DataSource::FilePath(p) = &job.data_source {
+                        let path = get_string(&fs::TransferJob::join(p, &file.name));
+                        match is_write_need_confirmation(is_resume, &path, &digest) {
+                            Ok(digest_result) => {
+                                job.set_digest(file_size, last_modified);
+                                match digest_result {
+                                    DigestCheckResult::IsSame => {
+                                        req.set_skip(true);
+                                        let msg_out = new_send_confirm(req);
+                                        send_raw(msg_out, &tx);
+                                    }
+                                    DigestCheckResult::NeedConfirm(mut digest) => {
+                                        // upload to server, but server has the same file, request
+                                        digest.is_upload = is_upload;
+                                        let mut msg_out = Message::new();
+                                        let mut fr = FileResponse::new();
+                                        fr.set_digest(digest);
+                                        msg_out.set_file_response(fr);
+                                        send_raw(msg_out, &tx);
+                                    }
+                                    DigestCheckResult::NoSuchFile => {
+                                        let msg_out = new_send_confirm(req);
+                                        send_raw(msg_out, &tx);
+                                    }
                                 }
                             }
-                        }
-                        Err(err) => {
-                            send_raw(fs::new_error(id, err, file_num), &tx);
+                            Err(err) => {
+                                send_raw(fs::new_error(id, err, file_num), &tx);
+                            }
                         }
                     }
+                }
+            }
+        }
+        ipc::FS::SendConfirm(bytes) => {
+            if let Ok(r) = FileTransferSendConfirmRequest::parse_from_bytes(&bytes) {
+                if let Some(job) = fs::get_job(r.id, write_jobs) {
+                    job.confirm(&r).await;
                 }
             }
         }
@@ -892,6 +923,26 @@ async fn handle_fs(
             rename_file(path, new_name, id, tx).await;
         }
         _ => {}
+    }
+}
+
+#[cfg(not(any(target_os = "ios")))]
+async fn read_empty_dirs(dir: &str, include_hidden: bool, tx: &UnboundedSender<Data>) {
+    let path = dir.to_owned();
+    let path_clone = dir.to_owned();
+
+    if let Ok(Ok(fds)) =
+        spawn_blocking(move || fs::get_empty_dirs_recursive(&path, include_hidden)).await
+    {
+        let mut msg_out = Message::new();
+        let mut file_response = FileResponse::new();
+        file_response.set_empty_dirs(ReadEmptyDirsResponse {
+            path: path_clone,
+            empty_dirs: fds,
+            ..Default::default()
+        });
+        msg_out.set_file_response(file_response);
+        send_raw(msg_out, tx);
     }
 }
 

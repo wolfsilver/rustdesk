@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -15,7 +16,7 @@ bool isEditOsPassword = false;
 
 class TTextMenu {
   final Widget child;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
   Widget? trailingIcon;
   bool divider;
   TTextMenu(
@@ -89,10 +90,13 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
   final pi = ffiModel.pi;
   final perms = ffiModel.permissions;
   final sessionId = ffi.sessionId;
+  final isDefaultConn = ffi.connType == ConnType.defaultConn;
 
   List<TTextMenu> v = [];
   // elevation
-  if (perms['keyboard'] != false && ffi.elevationModel.showRequestMenu) {
+  if (isDefaultConn &&
+      perms['keyboard'] != false &&
+      ffi.elevationModel.showRequestMenu) {
     v.add(
       TTextMenu(
           child: Text(translate('Request Elevation')),
@@ -101,7 +105,7 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
     );
   }
   // osAccount / osPassword
-  if (perms['keyboard'] != false) {
+  if (isDefaultConn && perms['keyboard'] != false) {
     v.add(
       TTextMenu(
         child: Row(children: [
@@ -130,7 +134,9 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
     );
   }
   // paste
-  if (pi.platform != kPeerPlatformAndroid && perms['keyboard'] != false) {
+  if (isDefaultConn &&
+      pi.platform != kPeerPlatformAndroid &&
+      perms['keyboard'] != false) {
     v.add(TTextMenu(
         child: Text(translate('Send clipboard keystrokes')),
         onPressed: () async {
@@ -142,31 +148,55 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
         }));
   }
   // reset canvas
-  if (isMobile) {
+  if (isDefaultConn && isMobile) {
     v.add(TTextMenu(
         child: Text(translate('Reset canvas')),
         onPressed: () => ffi.cursorModel.reset()));
   }
-  // transferFile
-  if (isDesktop) {
+
+  // https://github.com/rustdesk/rustdesk/pull/9731
+  // Does not work for connection established by "accept".
+  connectWithToken(
+      {bool isFileTransfer = false,
+      bool isViewCamera = false,
+      bool isTcpTunneling = false,
+      bool isTerminal = false}) {
+    final connToken = bind.sessionGetConnToken(sessionId: ffi.sessionId);
+    connect(context, id,
+        isFileTransfer: isFileTransfer,
+        isViewCamera: isViewCamera,
+        isTerminal: isTerminal,
+        isTcpTunneling: isTcpTunneling,
+        connToken: connToken);
+  }
+
+  if (isDefaultConn && isDesktop) {
     v.add(
       TTextMenu(
           child: Text(translate('Transfer file')),
-          onPressed: () => connect(context, id, isFileTransfer: true)),
+          onPressed: () => connectWithToken(isFileTransfer: true)),
     );
-  }
-  // tcpTunneling
-  if (isDesktop) {
+    v.add(
+      TTextMenu(
+          child: Text(translate('View camera')),
+          onPressed: () => connectWithToken(isViewCamera: true)),
+    );
+    v.add(
+      TTextMenu(
+          child: Text('${translate('Terminal')} (beta)'),
+          onPressed: () => connectWithToken(isTerminal: true)),
+    );
     v.add(
       TTextMenu(
           child: Text(translate('TCP tunneling')),
-          onPressed: () => connect(context, id, isTcpTunneling: true)),
+          onPressed: () => connectWithToken(isTcpTunneling: true)),
     );
   }
   // note
-  if (bind
-      .sessionGetAuditServerSync(sessionId: sessionId, typ: "conn")
-      .isNotEmpty) {
+  if (isDefaultConn &&
+      bind
+          .sessionGetAuditServerSync(sessionId: sessionId, typ: "conn")
+          .isNotEmpty) {
     v.add(
       TTextMenu(
           child: Text(translate('Note')),
@@ -174,21 +204,23 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
     );
   }
   // divider
-  if (isDesktop || isWebDesktop) {
+  if (isDefaultConn && (isDesktop || isWebDesktop)) {
     v.add(TTextMenu(child: Offstage(), onPressed: () {}, divider: true));
   }
   // ctrlAltDel
-  if (!ffiModel.viewOnly &&
+  if (isDefaultConn &&
+      !ffiModel.viewOnly &&
       ffiModel.keyboard &&
       (pi.platform == kPeerPlatformLinux || pi.sasEnabled)) {
     v.add(
       TTextMenu(
-          child: Text('${translate("Insert")} Ctrl + Alt + Del'),
+          child: Text('${translate("Insert Ctrl + Alt + Del")}'),
           onPressed: () => bind.sessionCtrlAltDel(sessionId: sessionId)),
     );
   }
   // restart
-  if (perms['restart'] != false &&
+  if (isDefaultConn &&
+      perms['restart'] != false &&
       (pi.platform == kPeerPlatformLinux ||
           pi.platform == kPeerPlatformWindows ||
           pi.platform == kPeerPlatformMacOS)) {
@@ -200,7 +232,7 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
     );
   }
   // insertLock
-  if (!ffiModel.viewOnly && ffi.ffiModel.keyboard) {
+  if (isDefaultConn && !ffiModel.viewOnly && ffi.ffiModel.keyboard) {
     v.add(
       TTextMenu(
           child: Text(translate('Insert Lock')),
@@ -208,7 +240,8 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
     );
   }
   // blockUserInput
-  if (ffi.ffiModel.keyboard &&
+  if (isDefaultConn &&
+      ffi.ffiModel.keyboard &&
       ffi.ffiModel.permissions['block_input'] != false &&
       pi.platform == kPeerPlatformWindows) // privacy-mode != true ??
   {
@@ -224,12 +257,13 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
         }));
   }
   // switchSides
-  if (isDesktop &&
+  if (isDefaultConn &&
+      isDesktop &&
       ffiModel.keyboard &&
       pi.platform != kPeerPlatformAndroid &&
       pi.platform != kPeerPlatformMacOS &&
       versionCmp(pi.version, '1.2.0') >= 0 &&
-      bind.peerGetDefaultSessionsCount(id: id) == 1) {
+      bind.peerGetSessionsCount(id: id, connType: ffi.connType.index) == 1) {
     v.add(TTextMenu(
         child: Text(translate('Switch Sides')),
         onPressed: () =>
@@ -262,6 +296,41 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
           ],
         ),
         onPressed: () => ffi.recordingModel.toggle()));
+  }
+
+  // to-do:
+  // 1. Web desktop
+  // 2. Mobile, copy the image to the clipboard
+  if (isDesktop) {
+    final isScreenshotSupported = bind.sessionGetCommonSync(
+        sessionId: sessionId, key: 'is_screenshot_supported', param: '');
+    if ('true' == isScreenshotSupported) {
+      v.add(TTextMenu(
+        child: Text(ffi.ffiModel.timerScreenshot != null
+            ? '${translate('Taking screenshot')} ...'
+            : translate('Take screenshot')),
+        onPressed: ffi.ffiModel.timerScreenshot != null
+            ? null
+            : () {
+                if (pi.currentDisplay == kAllDisplayValue) {
+                  msgBox(
+                      sessionId,
+                      'custom-nook-nocancel-hasclose-info',
+                      'Take screenshot',
+                      'screenshot-merged-screen-not-supported-tip',
+                      '',
+                      ffi.dialogManager);
+                } else {
+                  bind.sessionTakeScreenshot(
+                      sessionId: sessionId, display: pi.currentDisplay);
+                  ffi.ffiModel.timerScreenshot =
+                      Timer(Duration(seconds: 30), () {
+                    ffi.ffiModel.timerScreenshot = null;
+                  });
+                }
+              },
+      ));
+    }
   }
   // fingerprint
   if (!(isDesktop || isWebDesktop)) {
@@ -511,6 +580,7 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
   final pi = ffiModel.pi;
   final perms = ffiModel.permissions;
   final sessionId = ffi.sessionId;
+  final isDefaultConn = ffi.connType == ConnType.defaultConn;
 
   // show quality monitor
   final option = 'show-quality-monitor';
@@ -523,7 +593,7 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
       },
       child: Text(translate('Show quality monitor'))));
   // mute
-  if (perms['audio'] != false) {
+  if (isDefaultConn && perms['audio'] != false) {
     final option = 'disable-audio';
     final value =
         bind.sessionGetToggleOptionSync(sessionId: sessionId, arg: option);
@@ -544,7 +614,8 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
   final isSupportIfPeer_1_2_4 = versionCmp(pi.version, '1.2.4') >= 0 &&
       bind.mainHasFileClipboard() &&
       pi.platformAdditions.containsKey(kPlatformAdditionsHasFileClipboard);
-  if (ffiModel.keyboard &&
+  if (isDefaultConn &&
+      ffiModel.keyboard &&
       perms['file'] != false &&
       (isSupportIfPeer_1_2_3 || isSupportIfPeer_1_2_4)) {
     final enabled = !ffiModel.viewOnly;
@@ -562,7 +633,7 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
         child: Text(translate('Enable file copy and paste'))));
   }
   // disable clipboard
-  if (ffiModel.keyboard && perms['clipboard'] != false) {
+  if (isDefaultConn && ffiModel.keyboard && perms['clipboard'] != false) {
     final enabled = !ffiModel.viewOnly;
     final option = 'disable-clipboard';
     var value =
@@ -579,7 +650,7 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
         child: Text(translate('Disable clipboard'))));
   }
   // lock after session end
-  if (ffiModel.keyboard && !ffiModel.isPeerAndroid) {
+  if (isDefaultConn && ffiModel.keyboard && !ffiModel.isPeerAndroid) {
     final enabled = !ffiModel.viewOnly;
     final option = 'lock-after-session-end';
     final value =
@@ -644,12 +715,12 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
         child: Text(translate('True color (4:4:4)'))));
   }
 
-  if (isMobile) {
+  if (isDefaultConn && isMobile) {
     v.addAll(toolbarKeyboardToggles(ffi));
   }
 
   // view mode (mobile only, desktop is in keyboard menu)
-  if (isMobile && versionCmp(pi.version, '1.2.0') >= 0) {
+  if (isDefaultConn && isMobile && versionCmp(pi.version, '1.2.0') >= 0) {
     v.add(TToggleMenu(
         value: ffiModel.viewOnly,
         onChanged: (value) async {
