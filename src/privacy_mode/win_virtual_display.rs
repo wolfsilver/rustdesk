@@ -12,17 +12,21 @@ use winapi::{
     shared::{
         minwindef::{DWORD, FALSE},
         ntdef::{NULL, WCHAR},
+        windef::HDESK,
     },
     um::{
+        processthreadsapi::GetCurrentThreadId,
         wingdi::{
             DEVMODEW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ACTIVE, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP,
             DISPLAY_DEVICE_MIRRORING_DRIVER, DISPLAY_DEVICE_PRIMARY_DEVICE, DM_POSITION,
         },
+        winnt::MAXIMUM_ALLOWED,
         winuser::{
-            ChangeDisplaySettingsExW, EnumDisplayDevicesW, EnumDisplaySettingsExW,
-            EnumDisplaySettingsW, CDS_NORESET, CDS_RESET, CDS_SET_PRIMARY, CDS_UPDATEREGISTRY,
-            DISP_CHANGE_FAILED, DISP_CHANGE_SUCCESSFUL, EDD_GET_DEVICE_INTERFACE_NAME,
-            ENUM_CURRENT_SETTINGS, ENUM_REGISTRY_SETTINGS,
+            ChangeDisplaySettingsExW, CloseDesktop, EnumDisplayDevicesW, EnumDisplaySettingsExW,
+            EnumDisplaySettingsW, GetThreadDesktop, OpenInputDesktop, SetThreadDesktop,
+            CDS_NORESET, CDS_RESET, CDS_SET_PRIMARY, CDS_UPDATEREGISTRY, DISP_CHANGE_FAILED,
+            DISP_CHANGE_SUCCESSFUL, EDD_GET_DEVICE_INTERFACE_NAME, ENUM_CURRENT_SETTINGS,
+            ENUM_REGISTRY_SETTINGS,
         },
     },
 };
@@ -159,6 +163,43 @@ impl PrivacyModeImpl {
     }
 
     #[inline]
+    fn with_input_desktop<F, R>(f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        unsafe {
+            let desk_current = GetThreadDesktop(GetCurrentThreadId());
+            let desk_input = OpenInputDesktop(0, FALSE, MAXIMUM_ALLOWED);
+            let mut switched = false;
+            if !desk_input.is_null() && desk_input != desk_current {
+                if SetThreadDesktop(desk_input) != 0 {
+                    switched = true;
+                } else {
+                    log::warn!(
+                        "SetThreadDesktop(OpenInputDesktop) failed: {}",
+                        Error::last_os_error()
+                    );
+                }
+            }
+
+            let result = f();
+
+            if switched && !desk_current.is_null() && SetThreadDesktop(desk_current) == 0 {
+                log::warn!(
+                    "SetThreadDesktop(restore) failed: {}",
+                    Error::last_os_error()
+                );
+            }
+
+            if !desk_input.is_null() {
+                CloseDesktop(desk_input);
+            }
+
+            result
+        }
+    }
+
+    #[inline]
     fn change_display_settings_ex_err_msg(rc: i32) -> String {
         if rc != DISP_CHANGE_FAILED {
             format!("ret: {}", rc)
@@ -203,13 +244,15 @@ impl PrivacyModeImpl {
             new_primary_dm.u1.s2_mut().dmPosition.x = 0;
             new_primary_dm.u1.s2_mut().dmPosition.y = 0;
             new_primary_dm.dmFields |= DM_POSITION;
-            let rc = ChangeDisplaySettingsExW(
-                display.name.as_ptr(),
-                &mut new_primary_dm,
-                NULL as _,
-                flags | CDS_SET_PRIMARY,
-                NULL,
-            );
+            let rc = Self::with_input_desktop(|| unsafe {
+                ChangeDisplaySettingsExW(
+                    display.name.as_ptr(),
+                    &mut new_primary_dm,
+                    NULL as _,
+                    flags | CDS_SET_PRIMARY,
+                    NULL,
+                )
+            });
             if rc != DISP_CHANGE_SUCCESSFUL {
                 let err = Self::change_display_settings_ex_err_msg(rc);
                 log::error!(
@@ -255,13 +298,15 @@ impl PrivacyModeImpl {
                 dm.u1.s2_mut().dmPosition.x -= offx;
                 dm.u1.s2_mut().dmPosition.y -= offy;
                 dm.dmFields |= DM_POSITION;
-                let rc = ChangeDisplaySettingsExW(
-                    dd.DeviceName.as_ptr(),
-                    &mut dm,
-                    NULL as _,
-                    flags,
-                    NULL,
-                );
+                let rc = Self::with_input_desktop(|| unsafe {
+                    ChangeDisplaySettingsExW(
+                        dd.DeviceName.as_ptr(),
+                        &mut dm,
+                        NULL as _,
+                        flags,
+                        NULL,
+                    )
+                });
                 if rc != DISP_CHANGE_SUCCESSFUL {
                     let err = Self::change_display_settings_ex_err_msg(rc);
                     log::error!(
@@ -299,13 +344,15 @@ impl PrivacyModeImpl {
                 dm.dmPelsHeight = 0;
                 dm.dmPelsWidth = 0;
                 let flags = CDS_UPDATEREGISTRY | CDS_NORESET;
-                let rc = ChangeDisplaySettingsExW(
-                    display.name.as_ptr(),
-                    &mut dm,
-                    NULL as _,
-                    flags,
-                    NULL as _,
-                );
+                let rc = Self::with_input_desktop(|| unsafe {
+                    ChangeDisplaySettingsExW(
+                        display.name.as_ptr(),
+                        &mut dm,
+                        NULL as _,
+                        flags,
+                        NULL as _,
+                    )
+                });
                 if rc != DISP_CHANGE_SUCCESSFUL {
                     let err = Self::change_display_settings_ex_err_msg(rc);
                     log::error!(
@@ -384,7 +431,9 @@ impl PrivacyModeImpl {
             //     }
             // }
 
-            let rc = ChangeDisplaySettingsExW(NULL as _, NULL as _, NULL as _, flags, NULL as _);
+            let rc = Self::with_input_desktop(|| unsafe {
+                ChangeDisplaySettingsExW(NULL as _, NULL as _, NULL as _, flags, NULL as _)
+            });
             if rc != DISP_CHANGE_SUCCESSFUL {
                 let err = Self::change_display_settings_ex_err_msg(rc);
                 bail!("Failed ChangeDisplaySettingsEx, {}", err);
@@ -424,19 +473,27 @@ impl PrivacyModeImpl {
 
     fn restore_displays(displays: &[Display]) {
         for display in displays {
-            unsafe {
-                let mut dm = display.dm.clone();
-                let flags = if display.primary {
-                    CDS_NORESET | CDS_UPDATEREGISTRY | CDS_SET_PRIMARY
-                } else {
-                    CDS_NORESET | CDS_UPDATEREGISTRY
-                };
+            let mut dm = display.dm.clone();
+            let flags = if display.primary {
+                CDS_NORESET | CDS_UPDATEREGISTRY | CDS_SET_PRIMARY
+            } else {
+                CDS_NORESET | CDS_UPDATEREGISTRY
+            };
+            let rc = Self::with_input_desktop(|| unsafe {
                 ChangeDisplaySettingsExW(
                     display.name.as_ptr(),
                     &mut dm,
                     std::ptr::null_mut(),
                     flags,
                     std::ptr::null_mut(),
+                )
+            });
+            if rc != DISP_CHANGE_SUCCESSFUL {
+                log::warn!(
+                    "Restore ChangeDisplaySettingsEx failed for {:?}, flags: {}, {}",
+                    std::string::String::from_utf16_lossy(&display.name),
+                    flags,
+                    Self::change_display_settings_ex_err_msg(rc)
                 );
             }
         }
